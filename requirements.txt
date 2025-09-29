@@ -1,6 +1,7 @@
 requests==2.32.3
 beautifulsoup4==4.12.3
-gspread
+gspread==6.2.1
+gspread-formatting
 google-auth==2.31.0
 google-auth-oauthlib==1.2.0
 google-auth-httplib2==0.2.0
