@@ -1,0 +1,35 @@
+name: Web Scraper
+
+on:
+  schedule:
+    # Runs every 5 minutes for testing
+    - cron: '*/5 * * * *'
+    # For production, use this instead:
+    # - cron: '30 5,12 * * *'  # 11:00 AM and 6:00 PM IST
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+    
+    - name: Create service account file
+      env:
+        GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+      run: |
+        echo "$GOOGLE_CREDENTIALS" > service_account.json
+    
+    - name: Run scraper
+      run: |
+        python web_scraper.py
