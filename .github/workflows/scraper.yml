@@ -3,9 +3,8 @@ name: Web Scraper
 on:
   schedule:
     # Runs every 5 minutes for testing
-    - cron: '*/5 * * * *'
     # For production, use this instead:
-    # - cron: '30 5,12 * * *'  # 11:00 AM and 6:00 PM IST
+    - cron: '30 5,12 * * *'  # 11:00 AM and 6:00 PM IST
   workflow_dispatch: # Allows manual trigger
 
 jobs:
