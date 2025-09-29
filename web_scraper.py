@@ -240,73 +240,28 @@ class SeleniumWebScraperGoogleSheets:
                 logger.info(f"Added SUM formula to cell {diff_col_letter}{total_row_index}.")
                 
                 # Add conditional formatting to highlight negative numbers
+                # Note: If conditional formatting fails, you can manually add it in Google Sheets:
+                # 1. Select the range with hourly change values
+                # 2. Format → Conditional formatting 
+                # 3. Set condition to "Less than" and value "0"
+                # 4. Choose red background color
                 try:
-                    # Try multiple approaches for conditional formatting
-                    formatting_success = False
+                    rule = ConditionalFormatRule(
+                        ranges=[f'{diff_col_letter}2:{diff_col_letter}{data_end_row}'],
+                        booleanRule=BooleanCondition(
+                            'CUSTOM_FORMULA',
+                            [f'=${diff_col_letter}2<0']
+                        ),
+                        format=CellFormat(backgroundColor=Color(1.0, 0.6, 0.6))
+                    )
                     
-                    # Approach 1: Use CUSTOM_FORMULA (most reliable)
-                    try:
-                        rule = ConditionalFormatRule(
-                            ranges=[f'{diff_col_letter}2:{diff_col_letter}{data_end_row}'],
-                            booleanRule=BooleanCondition(
-                                'CUSTOM_FORMULA',
-                                [f'={diff_col_letter}2<0']
-                            ),
-                            format=CellFormat(backgroundColor=Color(1.0, 0.6, 0.6))  # Light red
-                        )
-                        
-                        rules = self.worksheet.get_conditional_format_rules()
-                        rules.append(rule)
-                        rules.save()
-                        formatting_success = True
-                        logger.info(f"Added conditional formatting (CUSTOM_FORMULA) to column {diff_col_letter}.")
-                    except Exception as e1:
-                        logger.warning(f"CUSTOM_FORMULA approach failed: {e1}")
-                        
-                        # Approach 2: Try NUMBER_LESS
-                        try:
-                            rule = ConditionalFormatRule(
-                                ranges=[f'{diff_col_letter}2:{diff_col_letter}{data_end_row}'],
-                                booleanRule=BooleanCondition(
-                                    'NUMBER_LESS',
-                                    ['0']
-                                ),
-                                format=CellFormat(backgroundColor=Color(1.0, 0.6, 0.6))
-                            )
-                            
-                            rules = self.worksheet.get_conditional_format_rules()
-                            rules.append(rule)
-                            rules.save()
-                            formatting_success = True
-                            logger.info(f"Added conditional formatting (NUMBER_LESS) to column {diff_col_letter}.")
-                        except Exception as e2:
-                            logger.warning(f"NUMBER_LESS approach failed: {e2}")
-                            
-                            # Approach 3: Try the old gspread_formatting import style
-                            try:
-                                from gspread_formatting import ConditionalFormatRule, BooleanRule, BooleanCondition, CellFormat, Color
-                                
-                                rule = ConditionalFormatRule(
-                                    ranges=[f'{diff_col_letter}2:{diff_col_letter}{data_end_row}'],
-                                    booleanRule=BooleanRule(
-                                        condition=BooleanCondition('NUMBER_LESS_THAN_EQ', ['0']),
-                                        format=CellFormat(backgroundColor=Color(1.0, 0.6, 0.6))
-                                    )
-                                )
-                                
-                                rules = self.worksheet.get_conditional_format_rules()
-                                rules.append(rule)
-                                rules.save()
-                                formatting_success = True
-                                logger.info(f"Added conditional formatting (BooleanRule) to column {diff_col_letter}.")
-                            except Exception as e3:
-                                logger.warning(f"BooleanRule approach failed: {e3}")
-                    
-                    if not formatting_success:
-                        logger.warning("All conditional formatting approaches failed. You may need to add the formatting manually.")
-                        
+                    rules = self.worksheet.get_conditional_format_rules()
+                    rules.append(rule)
+                    rules.save()
+                    logger.info(f"Added conditional formatting to column {diff_col_letter}.")
                 except Exception as e:
-                    logger.warning(f"Could not add conditional formatting: {e}")
+                    logger.warning(f"Could not add conditional formatting automatically: {e}")
+                    logger.info(f"Please manually add conditional formatting to column {diff_col_letter} for values < 0")
             else:
                 logger.info("Need at least 2 data columns to calculate hourly changes.")
 
