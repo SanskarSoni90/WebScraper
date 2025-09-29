@@ -55,49 +55,46 @@ class WebScraperGoogleSheets:
             raise
     
     def get_urls_from_sheet(self) -> List[str]:
-        """Get all URLs from column B hyperlinks of the sheet"""
+        """Alternative method to get URLs from hyperlinks using Google Sheets API"""
         try:
-            # Get the worksheet data with formulas to extract hyperlinks
-            all_values = self.worksheet.get_all_values()
-            if len(all_values) < 2:
-                logger.error("Sheet doesn't have enough rows")
-                return []
+            # Get the spreadsheet ID from the URL
+            spreadsheet_id = self.spreadsheet_url.split('/d/')[1].split('/')[0]
+            
+            # Use the Google Sheets API to get rich text formatting including hyperlinks
+            service = build('sheets', 'v4', credentials=self.gc.auth)
+            
+            # Get the sheet data including hyperlinks
+            result = service.spreadsheets().get(
+                spreadsheetId=spreadsheet_id,
+                ranges=['B:B'],
+                includeGridData=True
+            ).execute()
             
             urls = []
-            # Start from row 2 (index 1) to skip header
-            for row_index in range(1, len(all_values)):
-                if len(all_values[row_index]) > 1:  # Check if column B exists
-                    cell_value = all_values[row_index][1]  # Column B (index 1)
-                    if cell_value.strip():  # If cell has content
-                        # Try to get the hyperlink formula from the cell
-                        try:
-                            # Get the cell formula which might contain HYPERLINK
-                            cell_range = f'B{row_index + 1}'
-                            cell_formula = self.worksheet.acell(cell_range, value_render_option='FORMULA').value
-                            
-                            if cell_formula and cell_formula.startswith('=HYPERLINK('):
-                                # Extract URL from HYPERLINK formula
-                                # Format: =HYPERLINK("URL", "Display Text")
-                                start = cell_formula.find('"') + 1
-                                end = cell_formula.find('"', start)
-                                url = cell_formula[start:end]
+            sheets = result.get('sheets', [])
+            if sheets:
+                grid_data = sheets[0].get('data', [])
+                if grid_data:
+                    rows = grid_data[0].get('rowData', [])
+                    # Skip header row (index 0)
+                    for row_index, row in enumerate(rows[1:], start=2):
+                        if 'values' in row and len(row['values']) > 1:
+                            cell = row['values'][1]  # Column B
+                            if 'hyperlink' in cell:
+                                url = cell['hyperlink']
                                 urls.append(url)
-                                logger.info(f"Extracted URL: {url} from cell {cell_range}")
-                            else:
-                                # If it's not a hyperlink formula, check if it's a direct URL
-                                if cell_value.startswith('http'):
-                                    urls.append(cell_value)
-                                else:
-                                    logger.warning(f"Cell {cell_range} contains '{cell_value}' but no hyperlink found")
-                        except Exception as e:
-                            logger.warning(f"Could not extract hyperlink from row {row_index + 1}: {e}")
-                            continue
+                                logger.info(f"Found hyperlink in row {row_index}: {url}")
+                            elif 'formattedValue' in cell:
+                                # Check if it's a direct URL
+                                value = cell['formattedValue']
+                                if value.startswith('http'):
+                                    urls.append(value)
             
-            logger.info(f"Retrieved {len(urls)} URLs from sheet hyperlinks")
+            logger.info(f"Retrieved {len(urls)} URLs using alternative method")
             return urls
             
         except Exception as e:
-            logger.error(f"Error getting URLs from sheet: {e}")
+            logger.error(f"Error getting URLs using alternative method: {e}")
             return []
     
     def scrape_max_value(self, url: str) -> Optional[int]:
