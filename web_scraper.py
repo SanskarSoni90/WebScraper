@@ -185,9 +185,12 @@ class SeleniumWebScraperGoogleSheets:
             # Find the next available column to write data to
             header_row = self.worksheet.row_values(1)
             next_col_index = len(header_row) + 1
+
+            # Define the Indian Standard Time timezone
+            ist_tz = ZoneInfo("Asia/Kolkata")
             
             # Create a timestamped header for the new column
-            timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+            timestamp_str = datetime.now(ist_tz).strftime("%Y-%m-%d %H:%M")
             header_title = f"Indian Timestamp ({timestamp_str})"
             self.worksheet.update_cell(1, next_col_index, header_title)
             logger.info(f"Created new column with header: '{header_title}' at column index {next_col_index}")
