@@ -14,7 +14,14 @@ from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import TimeoutException
 from zoneinfo import ZoneInfo
 from gspread.utils import a1_to_rowcol, rowcol_to_a1
-from gspread.models import ConditionalFormatRule, BooleanCondition, CellFormat
+
+# Import from gspread-formatting package
+from gspread_formatting import (
+    ConditionalFormatRule,
+    BooleanCondition, 
+    CellFormat,
+    Color
+)
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -211,16 +218,21 @@ class SeleniumWebScraperGoogleSheets:
                 logger.info(f"Added SUM formula to cell {diff_col_letter}{total_row_index}.")
                 
                 # 6. Add conditional formatting to highlight negative numbers
-                rule = ConditionalFormatRule(
-                    ranges=[f'{diff_col_letter}2:{diff_col_letter}{total_row_index-1}'],
-                    booleanRule=BooleanCondition(
-                        'NUMBER_LESS_THAN',
-                        ['0']
-                    ),
-                    format=CellFormat(backgroundColor={'red': 0.9, 'green': 0.6, 'blue': 0.6}) # Light red
-                )
-                self.worksheet.add_conditional_format_rule(rule)
-                logger.info(f"Added conditional formatting to column {diff_col_letter}.")
+                try:
+                    rule = ConditionalFormatRule(
+                        ranges=[f'{diff_col_letter}2:{diff_col_letter}{total_row_index-1}'],
+                        booleanRule=BooleanCondition(
+                            'NUMBER_LESS_THAN',
+                            ['0']
+                        ),
+                        format=CellFormat(backgroundColor=Color(0.9, 0.6, 0.6)) # Light red
+                    )
+                    # Use gspread-formatting to add the rule
+                    from gspread_formatting import format_cell_ranges
+                    format_cell_ranges(self.worksheet, [(f'{diff_col_letter}2:{diff_col_letter}{total_row_index-1}', rule)])
+                    logger.info(f"Added conditional formatting to column {diff_col_letter}.")
+                except Exception as e:
+                    logger.warning(f"Could not add conditional formatting: {e}")
 
             logger.info("Scraping job completed successfully.")
             
