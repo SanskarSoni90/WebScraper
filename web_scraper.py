@@ -55,14 +55,49 @@ class WebScraperGoogleSheets:
             raise
     
     def get_urls_from_sheet(self) -> List[str]:
-        """Get all URLs from column B of the sheet"""
+        """Get all URLs from column B hyperlinks of the sheet"""
         try:
-            # Get all values in column B (starting from row 2 to skip header)
-            urls = self.worksheet.col_values(2)[1:]  # Column B, skip header
-            # Filter out empty cells
-            urls = [url.strip() for url in urls if url.strip()]
-            logger.info(f"Retrieved {len(urls)} URLs from sheet")
+            # Get all cells in column B with their rich text data
+            cell_list = self.worksheet.range('B2:B1000')  # Adjust range as needed
+            urls = []
+            
+            for cell in cell_list:
+                if not cell.value:  # Skip empty cells
+                    continue
+                    
+                # Try to get hyperlink from the cell
+                try:
+                    # Get the cell with formula to check for HYPERLINK function
+                    cell_formula = self.worksheet.cell(cell.row, cell.col, value_render_option='FORMULA').value
+                    
+                    if cell_formula and '=HYPERLINK(' in cell_formula:
+                        # Extract URL from HYPERLINK formula: =HYPERLINK("URL","text")
+                        import re
+                        match = re.search(r'=HYPERLINK\("([^"]+)"', cell_formula)
+                        if match:
+                            url = match.group(1)
+                            urls.append(url)
+                            logger.info(f"Row {cell.row}: Found URL {url}")
+                        else:
+                            logger.warning(f"Row {cell.row}: Could not extract URL from formula: {cell_formula}")
+                    elif cell.value.startswith('http'):
+                        # Direct URL
+                        urls.append(cell.value)
+                        logger.info(f"Row {cell.row}: Direct URL {cell.value}")
+                    else:
+                        logger.warning(f"Row {cell.row}: No hyperlink found for value: {cell.value}")
+                        
+                except Exception as e:
+                    logger.warning(f"Row {cell.row}: Error extracting hyperlink: {e}")
+                    continue
+            
+            # Remove empty entries and duplicates
+            urls = list(filter(None, urls))
+            urls = list(dict.fromkeys(urls))  # Remove duplicates while preserving order
+            
+            logger.info(f"Retrieved {len(urls)} unique URLs from sheet")
             return urls
+            
         except Exception as e:
             logger.error(f"Error getting URLs from sheet: {e}")
             return []
@@ -87,25 +122,85 @@ class WebScraperGoogleSheets:
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Look for the specific input element
-            input_element = soup.find('input', {
-                'class': lambda x: x and 'unit-selector-input' in x,
-                'type': 'number'
-            })
+    def scrape_max_value(self, url: str) -> Optional[int]:
+        """
+        Scrape the max value from the specified input element
+        
+        Args:
+            url: URL to scrape
+            
+        Returns:
+            Max value as integer or None if not found
+        """
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            response = requests.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Try multiple selectors to find the input element
+            selectors = [
+                # Original selector - most specific
+                {'class': lambda x: x and 'unit-selector-input' in x, 'type': 'number'},
+                # Look for input with specific classes
+                {'class': lambda x: x and 'border-black-20' in x and 'unit-selector-input' in x},
+                # Look for numeric input with max attribute
+                {'type': 'number', 'inputmode': 'numeric'},
+                # Look for any input with max attribute
+                {'type': 'number', 'max': True},
+                # Most generic - any number input
+                {'type': 'number'}
+            ]
+            
+            input_element = None
+            
+            # Try each selector until we find the element
+            for i, selector in enumerate(selectors):
+                if 'max' in selector and selector['max'] is True:
+                    # Special handling for max attribute check
+                    elements = soup.find_all('input', {'type': 'number'})
+                    for elem in elements:
+                        if elem.get('max'):
+                            input_element = elem
+                            logger.info(f"Found input element using selector {i+1} (max attribute check)")
+                            break
+                else:
+                    input_element = soup.find('input', selector)
+                    if input_element:
+                        logger.info(f"Found input element using selector {i+1}")
+                        break
+                
+                if input_element:
+                    break
             
             if input_element:
                 max_value = input_element.get('max')
                 if max_value:
+                    logger.info(f"Successfully extracted max value: {max_value} from {url}")
                     return int(max_value)
                 else:
-                    logger.warning(f"No 'max' attribute found in input element for {url}")
+                    logger.warning(f"Input element found but no 'max' attribute for {url}")
+                    # Also log the element for debugging
+                    logger.debug(f"Element found: {input_element}")
                     return None
             else:
                 logger.warning(f"Input element not found for {url}")
+                # For debugging, let's see what input elements are available
+                all_inputs = soup.find_all('input')
+                logger.debug(f"Found {len(all_inputs)} input elements on page")
+                for inp in all_inputs[:5]:  # Log first 5 input elements
+                    logger.debug(f"Input: type={inp.get('type')}, class={inp.get('class')}, max={inp.get('max')}")
                 return None
                 
         except requests.RequestException as e:
             logger.error(f"Request error for {url}: {e}")
+            return None
+        except ValueError as e:
+            logger.error(f"Error converting max value to integer for {url}: {e}")
             return None
         except Exception as e:
             logger.error(f"Error scraping {url}: {e}")
