@@ -174,79 +174,141 @@ class SeleniumWebScraperGoogleSheets:
             
             # === PART 2: AUTOMATED ANALYSIS ===
             # This part runs only if there are at least two data columns to compare
-            if next_data_col_index > 3:  # Need at least columns A, B, C (first data) and D (second data)
+            
+            # First, get updated header row after adding new data
+            updated_header_row = self.worksheet.row_values(1)
+            
+            # Find all data columns (not hourly change columns)
+            data_columns = []
+            for i, header in enumerate(updated_header_row, 1):
+                if header and header.startswith("Data (") and not header.startswith("Hourly Change"):
+                    data_columns.append(i)
+            
+            logger.info(f"Found {len(data_columns)} data columns: {data_columns}")
+            
+            if len(data_columns) >= 2:
                 logger.info("Performing automated analysis...")
-
-                # 1. Find the two most recent data columns (not hourly change columns)
-                data_columns = []
-                for i, header in enumerate(header_row, 1):
-                    if header and header.startswith("Data ("):
-                        data_columns.append(i)
                 
-                if len(data_columns) >= 2:
-                    # Use the two most recent data columns
-                    prev_data_col = data_columns[-2]  # Second most recent
-                    curr_data_col = data_columns[-1]  # Most recent
-                    
-                    # The new difference column will be the next available column
-                    all_headers = self.worksheet.row_values(1)
-                    diff_col_index = len([h for h in all_headers if h.strip()]) + 1
-                    diff_col_letter = rowcol_to_a1(1, diff_col_index)[:-1]
+                # Use the two most recent data columns
+                prev_data_col = data_columns[-2]  # Second most recent
+                curr_data_col = data_columns[-1]  # Most recent (just added)
+                
+                logger.info(f"Comparing column {prev_data_col} (previous) with column {curr_data_col} (current)")
+                
+                # The new difference column will be the next available column
+                all_headers = self.worksheet.row_values(1)
+                diff_col_index = len([h for h in all_headers if h.strip()]) + 1
+                diff_col_letter = rowcol_to_a1(1, diff_col_index)[:-1]
 
-                    logger.info(f"Comparing data from column {prev_data_col} with column {curr_data_col}")
+                # Read the two data columns and face value column
+                prev_values_str = self.worksheet.col_values(prev_data_col, value_render_option='UNFORMATTED_VALUE')[1:]
+                curr_values_str = self.worksheet.col_values(curr_data_col, value_render_option='UNFORMATTED_VALUE')[1:]
+                face_values_str = self.worksheet.col_values(3, value_render_option='UNFORMATTED_VALUE')[1:]  # Column C (Face Value)
 
-                    # 2. Read the two most recent data columns
-                    prev_values_str = self.worksheet.col_values(prev_data_col, value_render_option='UNFORMATTED_VALUE')[1:]
-                    curr_values_str = self.worksheet.col_values(curr_data_col, value_render_option='UNFORMATTED_VALUE')[1:]
-
-                    # 3. Calculate the differences
-                    diff_values = []
-                    for prev, curr in zip(prev_values_str, curr_values_str):
-                        try:
-                            # Convert to numbers, calculate difference. Default to 0 if empty.
-                            diff = float(curr or 0) - float(prev or 0)
-                            diff_values.append([diff])
-                        except (ValueError, TypeError):
-                            diff_values.append([""]) # Leave blank if values are not numbers
-
-                    # 4. Write the new "Hourly Change" column
-                    diff_header = f"Hourly Change ({timestamp_str})"
-                    self.worksheet.update_cell(1, diff_col_index, diff_header)
-                    if diff_values:
-                        self.worksheet.update(f'{diff_col_letter}2', diff_values)
-                    logger.info(f"Added '{diff_header}' column at index {diff_col_index}.")
-                    
-                    # 5. Add SUM formula at the bottom
-                    total_row_index = len(url_infos) + 3 
-                    sum_formula = f"=SUM({diff_col_letter}2:{diff_col_letter}{total_row_index-1})"
-                    self.worksheet.update_cell(total_row_index, diff_col_index, sum_formula)
-                    self.worksheet.update_cell(total_row_index, diff_col_index-1, "TOTAL:")
-                    logger.info(f"Added SUM formula to cell {diff_col_letter}{total_row_index}.")
-                    
-                    # 6. Add conditional formatting to highlight negative numbers
+                # Calculate the differences and multiply by face value
+                diff_values = []
+                for i, (prev, curr, face_val) in enumerate(zip(prev_values_str, curr_values_str, face_values_str)):
                     try:
-                        from gspread_formatting import ConditionalFormatRule, BooleanCondition, CellFormat, Color
+                        # Convert to numbers, calculate difference. Default to 0 if empty.
+                        prev_num = float(prev or 0)
+                        curr_num = float(curr or 0)
+                        face_num = float(face_val or 0)
                         
+                        # Calculate difference: current - previous
+                        price_diff = curr_num - prev_num
+                        # Multiply by face value
+                        total_diff = price_diff * face_num
+                        
+                        diff_values.append([total_diff])
+                        logger.debug(f"Row {i+2}: ({curr_num} - {prev_num}) * {face_num} = {total_diff}")
+                    except (ValueError, TypeError):
+                        diff_values.append([""]) # Leave blank if values are not numbers
+
+                # Write the new "Hourly Change" column
+                diff_header = f"Hourly Change ({timestamp_str})"
+                self.worksheet.update_cell(1, diff_col_index, diff_header)
+                if diff_values:
+                    self.worksheet.update(f'{diff_col_letter}2', diff_values)
+                logger.info(f"Added '{diff_header}' column at index {diff_col_index}.")
+                
+                # Add SUM formula at the bottom
+                data_end_row = len(url_infos) + 1  # Last row with data
+                total_row_index = data_end_row + 2  # Skip one row, then add TOTAL
+                sum_formula = f"=SUM({diff_col_letter}2:{diff_col_letter}{data_end_row})"
+                self.worksheet.update_cell(total_row_index, diff_col_index, sum_formula)
+                self.worksheet.update_cell(total_row_index, diff_col_index-1, "TOTAL:")
+                logger.info(f"Added SUM formula to cell {diff_col_letter}{total_row_index}.")
+                
+                # Add conditional formatting to highlight negative numbers
+                try:
+                    # Try multiple approaches for conditional formatting
+                    formatting_success = False
+                    
+                    # Approach 1: Use CUSTOM_FORMULA (most reliable)
+                    try:
                         rule = ConditionalFormatRule(
-                            ranges=[f'{diff_col_letter}2:{diff_col_letter}{total_row_index-1}'],
+                            ranges=[f'{diff_col_letter}2:{diff_col_letter}{data_end_row}'],
                             booleanRule=BooleanCondition(
-                                'NUMBER_LESS',  # Changed from 'NUMBER_LESS_THAN'
-                                ['0']
+                                'CUSTOM_FORMULA',
+                                [f'={diff_col_letter}2<0']
                             ),
-                            format=CellFormat(backgroundColor=Color(0.9, 0.6, 0.6)) # Light red
+                            format=CellFormat(backgroundColor=Color(1.0, 0.6, 0.6))  # Light red
                         )
                         
-                        # Apply the conditional formatting rule
                         rules = self.worksheet.get_conditional_format_rules()
                         rules.append(rule)
                         rules.save()
-                        logger.info(f"Added conditional formatting to column {diff_col_letter}.")
-                    except Exception as e:
-                        logger.warning(f"Could not add conditional formatting: {e}")
-                else:
-                    logger.info("Need at least 2 data columns to calculate hourly changes.")
+                        formatting_success = True
+                        logger.info(f"Added conditional formatting (CUSTOM_FORMULA) to column {diff_col_letter}.")
+                    except Exception as e1:
+                        logger.warning(f"CUSTOM_FORMULA approach failed: {e1}")
+                        
+                        # Approach 2: Try NUMBER_LESS
+                        try:
+                            rule = ConditionalFormatRule(
+                                ranges=[f'{diff_col_letter}2:{diff_col_letter}{data_end_row}'],
+                                booleanRule=BooleanCondition(
+                                    'NUMBER_LESS',
+                                    ['0']
+                                ),
+                                format=CellFormat(backgroundColor=Color(1.0, 0.6, 0.6))
+                            )
+                            
+                            rules = self.worksheet.get_conditional_format_rules()
+                            rules.append(rule)
+                            rules.save()
+                            formatting_success = True
+                            logger.info(f"Added conditional formatting (NUMBER_LESS) to column {diff_col_letter}.")
+                        except Exception as e2:
+                            logger.warning(f"NUMBER_LESS approach failed: {e2}")
+                            
+                            # Approach 3: Try the old gspread_formatting import style
+                            try:
+                                from gspread_formatting import ConditionalFormatRule, BooleanRule, BooleanCondition, CellFormat, Color
+                                
+                                rule = ConditionalFormatRule(
+                                    ranges=[f'{diff_col_letter}2:{diff_col_letter}{data_end_row}'],
+                                    booleanRule=BooleanRule(
+                                        condition=BooleanCondition('NUMBER_LESS_THAN_EQ', ['0']),
+                                        format=CellFormat(backgroundColor=Color(1.0, 0.6, 0.6))
+                                    )
+                                )
+                                
+                                rules = self.worksheet.get_conditional_format_rules()
+                                rules.append(rule)
+                                rules.save()
+                                formatting_success = True
+                                logger.info(f"Added conditional formatting (BooleanRule) to column {diff_col_letter}.")
+                            except Exception as e3:
+                                logger.warning(f"BooleanRule approach failed: {e3}")
+                    
+                    if not formatting_success:
+                        logger.warning("All conditional formatting approaches failed. You may need to add the formatting manually.")
+                        
+                except Exception as e:
+                    logger.warning(f"Could not add conditional formatting: {e}")
             else:
-                logger.info("This is the first data collection, no comparison possible yet.")
+                logger.info("Need at least 2 data columns to calculate hourly changes.")
 
             logger.info("Scraping job completed successfully.")
             
