@@ -1,8 +1,8 @@
-requests==2.31.0
-beautifulsoup4==4.12.2
-gspread==5.10.0
-google-auth==2.23.0
-google-auth-oauthlib==1.0.0
-google-auth-httplib2==0.1.0
-lxml==4.9.3
-selenium
+requests==2.32.3
+beautifulsoup4==4.12.3
+gspread==6.0.2
+google-auth==2.31.0
+google-auth-oauthlib==1.2.0
+google-auth-httplib2==0.2.0
+lxml==5.2.2
+selenium==4.22.0
