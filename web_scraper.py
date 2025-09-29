@@ -156,9 +156,8 @@ class SeleniumWebScraperGoogleSheets:
                 return
 
             header_row = self.worksheet.row_values(1)
-            # Find the first column that doesn't start with "Hourly Change"
-            raw_data_columns = [h for h in header_row if not str(h).startswith("Hourly Change")]
-            next_data_col_index = len(raw_data_columns) + 1
+            # Always append to the next available column (never overwrite)
+            next_data_col_index = len([h for h in header_row if h.strip()]) + 1
 
             ist_tz = ZoneInfo("Asia/Kolkata")
             timestamp_str = datetime.now(ist_tz).strftime("%Y-%m-%d %H:%M")
@@ -175,64 +174,79 @@ class SeleniumWebScraperGoogleSheets:
             
             # === PART 2: AUTOMATED ANALYSIS ===
             # This part runs only if there are at least two data columns to compare
-            # Assuming data starts in column C (index 3), so we need C and D.
-            if next_data_col_index > 3:
+            if next_data_col_index > 3:  # Need at least columns A, B, C (first data) and D (second data)
                 logger.info("Performing automated analysis...")
 
-                # 1. Define columns for calculation
-                prev_data_col = next_data_col_index - 1
-                curr_data_col = next_data_col_index
+                # 1. Find the two most recent data columns (not hourly change columns)
+                data_columns = []
+                for i, header in enumerate(header_row, 1):
+                    if header and header.startswith("Data ("):
+                        data_columns.append(i)
                 
-                # The new difference column will be the next available column in the sheet
-                all_headers = self.worksheet.row_values(1)
-                diff_col_index = len(all_headers) + 1
-                diff_col_letter = rowcol_to_a1(1, diff_col_index)[:-1]
+                if len(data_columns) >= 2:
+                    # Use the two most recent data columns
+                    prev_data_col = data_columns[-2]  # Second most recent
+                    curr_data_col = data_columns[-1]  # Most recent
+                    
+                    # The new difference column will be the next available column
+                    all_headers = self.worksheet.row_values(1)
+                    diff_col_index = len([h for h in all_headers if h.strip()]) + 1
+                    diff_col_letter = rowcol_to_a1(1, diff_col_index)[:-1]
 
-                # 2. Read the two most recent data columns
-                prev_values_str = self.worksheet.col_values(prev_data_col, value_render_option='UNFORMATTED_VALUE')[1:]
-                curr_values_str = self.worksheet.col_values(curr_data_col, value_render_option='UNFORMATTED_VALUE')[1:]
+                    logger.info(f"Comparing data from column {prev_data_col} with column {curr_data_col}")
 
-                # 3. Calculate the differences
-                diff_values = []
-                for prev, curr in zip(prev_values_str, curr_values_str):
+                    # 2. Read the two most recent data columns
+                    prev_values_str = self.worksheet.col_values(prev_data_col, value_render_option='UNFORMATTED_VALUE')[1:]
+                    curr_values_str = self.worksheet.col_values(curr_data_col, value_render_option='UNFORMATTED_VALUE')[1:]
+
+                    # 3. Calculate the differences
+                    diff_values = []
+                    for prev, curr in zip(prev_values_str, curr_values_str):
+                        try:
+                            # Convert to numbers, calculate difference. Default to 0 if empty.
+                            diff = float(curr or 0) - float(prev or 0)
+                            diff_values.append([diff])
+                        except (ValueError, TypeError):
+                            diff_values.append([""]) # Leave blank if values are not numbers
+
+                    # 4. Write the new "Hourly Change" column
+                    diff_header = f"Hourly Change ({timestamp_str})"
+                    self.worksheet.update_cell(1, diff_col_index, diff_header)
+                    if diff_values:
+                        self.worksheet.update(f'{diff_col_letter}2', diff_values)
+                    logger.info(f"Added '{diff_header}' column at index {diff_col_index}.")
+                    
+                    # 5. Add SUM formula at the bottom
+                    total_row_index = len(url_infos) + 3 
+                    sum_formula = f"=SUM({diff_col_letter}2:{diff_col_letter}{total_row_index-1})"
+                    self.worksheet.update_cell(total_row_index, diff_col_index, sum_formula)
+                    self.worksheet.update_cell(total_row_index, diff_col_index-1, "TOTAL:")
+                    logger.info(f"Added SUM formula to cell {diff_col_letter}{total_row_index}.")
+                    
+                    # 6. Add conditional formatting to highlight negative numbers
                     try:
-                        # Convert to numbers, calculate difference. Default to 0 if empty.
-                        diff = float(prev or 0) - float(curr or 0)
-                        diff_values.append([diff])
-                    except (ValueError, TypeError):
-                        diff_values.append([""]) # Leave blank if values are not numbers
-
-                # 4. Write the new "Hourly Change" column
-                diff_header = f"Hourly Change ({timestamp_str})"
-                self.worksheet.update_cell(1, diff_col_index, diff_header)
-                if diff_values:
-                    self.worksheet.update(f'{diff_col_letter}2', diff_values)
-                logger.info(f"Added '{diff_header}' column at index {diff_col_index}.")
-                
-                # 5. Add SUM formula at the bottom
-                # Assuming max 1000 rows of data.
-                total_row_index = len(url_infos) + 3 
-                sum_formula = f"=SUM({diff_col_letter}2:{diff_col_letter}{total_row_index-1})"
-                self.worksheet.update_cell(total_row_index, diff_col_index, sum_formula)
-                self.worksheet.update_cell(total_row_index, diff_col_index-1, "TOTAL:")
-                logger.info(f"Added SUM formula to cell {diff_col_letter}{total_row_index}.")
-                
-                # 6. Add conditional formatting to highlight negative numbers
-                try:
-                    rule = ConditionalFormatRule(
-                        ranges=[f'{diff_col_letter}2:{diff_col_letter}{total_row_index-1}'],
-                        booleanRule=BooleanCondition(
-                            'NUMBER_LESS',
-                            ['0']
-                        ),
-                        format=CellFormat(backgroundColor=Color(0.9, 0.6, 0.6)) # Light red
-                    )
-                    # Use gspread-formatting to add the rule
-                    from gspread_formatting import format_cell_ranges
-                    format_cell_ranges(self.worksheet, [(f'{diff_col_letter}2:{diff_col_letter}{total_row_index-1}', rule)])
-                    logger.info(f"Added conditional formatting to column {diff_col_letter}.")
-                except Exception as e:
-                    logger.warning(f"Could not add conditional formatting: {e}")
+                        from gspread_formatting import ConditionalFormatRule, BooleanCondition, CellFormat, Color
+                        
+                        rule = ConditionalFormatRule(
+                            ranges=[f'{diff_col_letter}2:{diff_col_letter}{total_row_index-1}'],
+                            booleanRule=BooleanCondition(
+                                'NUMBER_LESS',  # Changed from 'NUMBER_LESS_THAN'
+                                ['0']
+                            ),
+                            format=CellFormat(backgroundColor=Color(0.9, 0.6, 0.6)) # Light red
+                        )
+                        
+                        # Apply the conditional formatting rule
+                        rules = self.worksheet.get_conditional_format_rules()
+                        rules.append(rule)
+                        rules.save()
+                        logger.info(f"Added conditional formatting to column {diff_col_letter}.")
+                    except Exception as e:
+                        logger.warning(f"Could not add conditional formatting: {e}")
+                else:
+                    logger.info("Need at least 2 data columns to calculate hourly changes.")
+            else:
+                logger.info("This is the first data collection, no comparison possible yet.")
 
             logger.info("Scraping job completed successfully.")
             
