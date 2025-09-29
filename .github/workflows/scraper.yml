@@ -2,8 +2,7 @@ name: Web Scraper
 
 on:
   schedule:
-    # Runs every 5 minutes for testing
-    # For production, use this instead:
+    # Runs at the beginning of every hour
     - cron: '0 * * * *'
   workflow_dispatch: # Allows manual trigger
 
@@ -12,18 +11,24 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v3
+    - name: Check out repository
+      uses: actions/checkout@v4
     
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.9'
-        cache: 'pip' # Caches dependencies based on requirements.txt
-  
+        cache: 'pip' # Caches dependencies to ensure fresh installs on change
+    
     - name: Install dependencies
       run: |
         pip install -r requirements.txt
     
+    - name: 🧐 Debug - List Installed Packages
+      run: |
+        echo "--- Verifying installed packages ---"
+        pip list
+        
     - name: Create service account file
       env:
         GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
