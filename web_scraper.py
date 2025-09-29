@@ -222,7 +222,7 @@ class SeleniumWebScraperGoogleSheets:
                     rule = ConditionalFormatRule(
                         ranges=[f'{diff_col_letter}2:{diff_col_letter}{total_row_index-1}'],
                         booleanRule=BooleanCondition(
-                            'NUMBER_LESS_THAN',
+                            'NUMBER_LESS',
                             ['0']
                         ),
                         format=CellFormat(backgroundColor=Color(0.9, 0.6, 0.6)) # Light red
