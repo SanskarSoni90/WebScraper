@@ -197,7 +197,7 @@ class SeleniumWebScraperGoogleSheets:
                 for prev, curr in zip(prev_values_str, curr_values_str):
                     try:
                         # Convert to numbers, calculate difference. Default to 0 if empty.
-                        diff = float(curr or 0) - float(prev or 0)
+                        diff = float(prev or 0) - float(curr or 0)
                         diff_values.append([diff])
                     except (ValueError, TypeError):
                         diff_values.append([""]) # Leave blank if values are not numbers
