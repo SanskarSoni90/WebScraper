@@ -13,7 +13,6 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import TimeoutException
 from zoneinfo import ZoneInfo
-# --- NEW IMPORTS ---
 from gspread.utils import a1_to_rowcol, rowcol_to_a1
 from gspread.models import ConditionalFormatRule, BooleanCondition, CellFormat
 
