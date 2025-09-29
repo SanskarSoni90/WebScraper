@@ -276,6 +276,54 @@ class WebScraperGoogleSheets:
         self.update_sheet_with_values(max_values, timestamp)
         logger.info("Scraping job completed successfully")
 
+    def test_single_url(self, url: str):
+        """Test scraping a single URL for debugging"""
+        logger.info(f"Testing URL: {url}")
+        
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            response = requests.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Find all input elements and log them
+            all_inputs = soup.find_all('input')
+            logger.info(f"Found {len(all_inputs)} input elements")
+            
+            for i, inp in enumerate(all_inputs):
+                logger.info(f"Input {i+1}: type={inp.get('type')}, class={inp.get('class')}, max={inp.get('max')}, value={inp.get('value')}")
+                
+            # Specifically look for the target element
+            target = soup.find('input', {'class': lambda x: x and 'unit-selector-input' in x})
+            if target:
+                logger.info(f"Target element found: {target}")
+                logger.info(f"Max value: {target.get('max')}")
+            else:
+                logger.warning("Target element not found")
+                
+        except Exception as e:
+            logger.error(f"Error testing URL: {e}")
+
+def test_url():
+    """Standalone function to test a single URL"""
+    # Configuration
+    CREDENTIALS_PATH = os.getenv('GOOGLE_CREDENTIALS_PATH', 'service_account.json')
+    SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/1dIFvqToTTF0G9qyRy6dSdAtVOU763K0N3iOLkp0iWJY/edit?gid=0#gid=0'
+    
+    try:
+        scraper = WebScraperGoogleSheets(CREDENTIALS_PATH, SPREADSHEET_URL)
+        test_url = "https://stablebonds.in/bonds/iifl-samasta-finance-limited/INE413U07392"
+        scraper.test_single_url(test_url)
+        max_val = scraper.scrape_max_value(test_url)
+        logger.info(f"Final result: {max_val}")
+        
+    except Exception as e:
+        logger.error(f"Error in test: {e}")
+
 def main():
     """Main function to run the scraper"""
     # Configuration
@@ -285,6 +333,9 @@ def main():
     try:
         # Initialize scraper
         scraper = WebScraperGoogleSheets(CREDENTIALS_PATH, SPREADSHEET_URL)
+        
+        # For testing, uncomment the line below to test a single URL first
+        # test_url()
         
         # Run scraping job
         scraper.run_scraping_job()
