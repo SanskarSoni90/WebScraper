@@ -55,14 +55,47 @@ class WebScraperGoogleSheets:
             raise
     
     def get_urls_from_sheet(self) -> List[str]:
-        """Get all URLs from column B of the sheet"""
+        """Get all URLs from column B hyperlinks of the sheet"""
         try:
-            # Get all values in column B (starting from row 2 to skip header)
-            urls = self.worksheet.col_values(2)[1:]  # Column B, skip header
-            # Filter out empty cells
-            urls = [url.strip() for url in urls if url.strip()]
-            logger.info(f"Retrieved {len(urls)} URLs from sheet")
+            # Get the worksheet data with formulas to extract hyperlinks
+            all_values = self.worksheet.get_all_values()
+            if len(all_values) < 2:
+                logger.error("Sheet doesn't have enough rows")
+                return []
+            
+            urls = []
+            # Start from row 2 (index 1) to skip header
+            for row_index in range(1, len(all_values)):
+                if len(all_values[row_index]) > 1:  # Check if column B exists
+                    cell_value = all_values[row_index][1]  # Column B (index 1)
+                    if cell_value.strip():  # If cell has content
+                        # Try to get the hyperlink formula from the cell
+                        try:
+                            # Get the cell formula which might contain HYPERLINK
+                            cell_range = f'B{row_index + 1}'
+                            cell_formula = self.worksheet.acell(cell_range, value_render_option='FORMULA').value
+                            
+                            if cell_formula and cell_formula.startswith('=HYPERLINK('):
+                                # Extract URL from HYPERLINK formula
+                                # Format: =HYPERLINK("URL", "Display Text")
+                                start = cell_formula.find('"') + 1
+                                end = cell_formula.find('"', start)
+                                url = cell_formula[start:end]
+                                urls.append(url)
+                                logger.info(f"Extracted URL: {url} from cell {cell_range}")
+                            else:
+                                # If it's not a hyperlink formula, check if it's a direct URL
+                                if cell_value.startswith('http'):
+                                    urls.append(cell_value)
+                                else:
+                                    logger.warning(f"Cell {cell_range} contains '{cell_value}' but no hyperlink found")
+                        except Exception as e:
+                            logger.warning(f"Could not extract hyperlink from row {row_index + 1}: {e}")
+                            continue
+            
+            logger.info(f"Retrieved {len(urls)} URLs from sheet hyperlinks")
             return urls
+            
         except Exception as e:
             logger.error(f"Error getting URLs from sheet: {e}")
             return []
