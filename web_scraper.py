@@ -55,46 +55,16 @@ class WebScraperGoogleSheets:
             raise
     
     def get_urls_from_sheet(self) -> List[str]:
-        """Alternative method to get URLs from hyperlinks using Google Sheets API"""
+        """Get all URLs from column B of the sheet"""
         try:
-            # Get the spreadsheet ID from the URL
-            spreadsheet_id = self.spreadsheet_url.split('/d/')[1].split('/')[0]
-            
-            # Use the Google Sheets API to get rich text formatting including hyperlinks
-            service = build('sheets', 'v4', credentials=self.gc.auth)
-            
-            # Get the sheet data including hyperlinks
-            result = service.spreadsheets().get(
-                spreadsheetId=spreadsheet_id,
-                ranges=['B:B'],
-                includeGridData=True
-            ).execute()
-            
-            urls = []
-            sheets = result.get('sheets', [])
-            if sheets:
-                grid_data = sheets[0].get('data', [])
-                if grid_data:
-                    rows = grid_data[0].get('rowData', [])
-                    # Skip header row (index 0)
-                    for row_index, row in enumerate(rows[1:], start=2):
-                        if 'values' in row and len(row['values']) > 1:
-                            cell = row['values'][1]  # Column B
-                            if 'hyperlink' in cell:
-                                url = cell['hyperlink']
-                                urls.append(url)
-                                logger.info(f"Found hyperlink in row {row_index}: {url}")
-                            elif 'formattedValue' in cell:
-                                # Check if it's a direct URL
-                                value = cell['formattedValue']
-                                if value.startswith('http'):
-                                    urls.append(value)
-            
-            logger.info(f"Retrieved {len(urls)} URLs using alternative method")
+            # Get all values in column B (starting from row 2 to skip header)
+            urls = self.worksheet.col_values(2)[1:]  # Column B, skip header
+            # Filter out empty cells
+            urls = [url.strip() for url in urls if url.strip()]
+            logger.info(f"Retrieved {len(urls)} URLs from sheet")
             return urls
-            
         except Exception as e:
-            logger.error(f"Error getting URLs using alternative method: {e}")
+            logger.error(f"Error getting URLs from sheet: {e}")
             return []
     
     def scrape_max_value(self, url: str) -> Optional[int]:
