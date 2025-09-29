@@ -122,26 +122,6 @@ class WebScraperGoogleSheets:
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
-    def scrape_max_value(self, url: str) -> Optional[int]:
-        """
-        Scrape the max value from the specified input element
-        
-        Args:
-            url: URL to scrape
-            
-        Returns:
-            Max value as integer or None if not found
-        """
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
             # Try multiple selectors to find the input element
             selectors = [
                 # Original selector - most specific
