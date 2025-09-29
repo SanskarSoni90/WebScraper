@@ -72,38 +72,38 @@ class SeleniumWebScraperGoogleSheets:
     
     def get_urls_from_sheet(self) -> List[Dict[str, any]]:
         """
-        Get all URLs and their corresponding row numbers from column B.
+        Get all URLs and their corresponding row numbers from column B using an efficient batch request.
         
         Returns:
             A list of dictionaries, where each dictionary contains a 'row' and 'url'.
-            Example: [{'row': 2, 'url': 'http://example.com'}, {'row': 5, 'url': 'http://anotherexample.com'}]
         """
         try:
-            # Assumes URLs are in column B. Change 'B2:B' if they are in another column.
-            cells_with_urls = self.worksheet.range(f'B2:B{self.worksheet.row_count}')
-            url_data = []
+            logger.info("Fetching all URLs from sheet in a single batch request...")
+            # BATCH GET: Get all formulas from column B (starting at row 2) in ONE API call.
+            # Change 'B2:B' if your URLs are in a different column.
+            all_formulas = self.worksheet.get('B2:B', value_render_option='FORMULA')
             
-            for cell in cells_with_urls:
-                if not cell.value:
-                    continue
+            url_data = []
+            # The loop now runs on data already in memory, making no new API calls.
+            for index, formula_cell in enumerate(all_formulas):
+                row_num = index + 2  # +2 because our range starts from row 2
                 
+                # The result is a list within a list, e.g., [['=HYPERLINK(...)']] or [['https...']]
+                if not formula_cell:
+                    continue # Skip empty rows
+                
+                cell_content = formula_cell[0]
                 url = None
-                try:
-                    # Check for =HYPERLINK("url", "text") formula
-                    cell_formula = self.worksheet.cell(cell.row, cell.col, value_render_option='FORMULA').value
-                    if cell_formula and '=HYPERLINK' in str(cell_formula).upper():
-                        match = re.search(r'=HYPERLINK\("([^"]+)"', cell_formula, re.IGNORECASE)
-                        if match:
-                            url = match.group(1)
-                    # Check for plain http/https link
-                    elif str(cell.value).startswith('http'):
-                        url = cell.value
+                
+                if '=HYPERLINK' in str(cell_content).upper():
+                    match = re.search(r'=HYPERLINK\("([^"]+)"', cell_content, re.IGNORECASE)
+                    if match:
+                        url = match.group(1)
+                elif str(cell_content).startswith('http'):
+                    url = cell_content
 
-                    if url:
-                        url_data.append({'row': cell.row, 'url': url})
-                        
-                except Exception as e:
-                    logger.warning(f"Row {cell.row}: Could not process cell. Error: {e}")
+                if url:
+                    url_data.append({'row': row_num, 'url': url})
             
             logger.info(f"Retrieved {len(url_data)} URLs from the sheet.")
             return url_data
@@ -111,7 +111,7 @@ class SeleniumWebScraperGoogleSheets:
         except Exception as e:
             logger.error(f"Error getting URLs from sheet: {e}")
             return []
-
+            
     def scrape_max_value(self, url: str) -> Optional[int]:
         """
         Scrape the max value from the specified input element using Selenium.
