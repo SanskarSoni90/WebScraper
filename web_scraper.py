@@ -228,7 +228,7 @@ class SeleniumWebScraperGoogleSheets:
                 diff_header = f"Hourly Change ({timestamp_str})"
                 self.worksheet.update_cell(1, diff_col_index, diff_header)
                 if diff_values:
-                    self.worksheet.update(f'{diff_col_letter}2', diff_values)
+                    self.worksheet.update(diff_values, f'{diff_col_letter}2')
                 logger.info(f"Added '{diff_header}' column at index {diff_col_index}.")
                 
                 # Add SUM formula at the bottom
@@ -250,9 +250,9 @@ class SeleniumWebScraperGoogleSheets:
                         ranges=[f'{diff_col_letter}2:{diff_col_letter}{data_end_row}'],
                         booleanRule=BooleanCondition(
                             'CUSTOM_FORMULA',
-                            [f'=${diff_col_letter}2<0']
-                        ),
-                        format=CellFormat(backgroundColor=Color(1.0, 0.6, 0.6))
+                            [f'=${diff_col_letter}2<0'],
+                            format=CellFormat(backgroundColor=Color(1.0, 0.6, 0.6))
+                        )
                     )
                     
                     rules = self.worksheet.get_conditional_format_rules()
