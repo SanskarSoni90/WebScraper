@@ -215,7 +215,7 @@ class SeleniumWebScraperGoogleSheets:
                         face_num = float(face_val or 0)
                         
                         # Calculate difference: current - previous
-                        price_diff = curr_num - prev_num
+                        price_diff = prev_num - curr_num
                         # Multiply by face value
                         total_diff = price_diff * face_num
                         
