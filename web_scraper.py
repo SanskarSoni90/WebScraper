@@ -298,7 +298,7 @@ class StablebondsScraper:
                 logger.info(f"Added '{diff_header}' column at index {diff_col_index}.")
                 
                 # Add SUM formula at the bottom
-                data_end_row = len(url_infos) + 1  # Last row with data
+                data_end_row = row_num + 1  # Last row with data
                 total_row_index = data_end_row + 2  # Skip one row, then add TOTAL
                 sum_formula = f"=SUM({diff_col_letter}2:{diff_col_letter}{data_end_row})"
                 self.worksheet.update_cell(total_row_index, diff_col_index, sum_formula)
