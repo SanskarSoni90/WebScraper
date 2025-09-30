@@ -102,15 +102,22 @@ class StablebondsScraper:
             return set()
 
     def scrape_homepage_for_new_bonds(self, existing_urls: Set[str]) -> List[Dict[str, str]]:
-        """Scrapes the Stablebonds homepage and returns a list of new, unique bonds based on URL."""
+        """
+        Scrapes the Stablebonds homepage using Selenium to handle dynamic content,
+        and returns a list of new, unique bonds based on URL.
+        """
         url = "https://stablebonds.in/"
         new_bonds = []
         try:
-            logger.info(f"Scraping homepage: {url}")
-            response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
-            response.raise_for_status()
+            logger.info(f"Scraping homepage with Selenium: {url}")
+            self.driver.get(url)
+
+            # Wait for the bond container to be present on the page
+            wait = WebDriverWait(self.driver, 20)
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.scrollbar-none a[data-anchor='true'] h4")))
             
-            soup = BeautifulSoup(response.text, 'lxml')
+            # Now that the page is loaded, parse it with BeautifulSoup
+            soup = BeautifulSoup(self.driver.page_source, 'lxml')
             
             bond_links = soup.select("div.scrollbar-none a[data-anchor='true']")
             logger.info(f"Found {len(bond_links)} bond links on the homepage.")
@@ -121,15 +128,17 @@ class StablebondsScraper:
                     continue
 
                 if href not in existing_urls:
-                    parts = href.strip('/').split('/')
-                    name = parts[-2] if len(parts) > 1 else ''
+                    # *** MODIFIED LOGIC HERE ***
+                    # Find the <h4> tag inside the link to get the display name
+                    name_tag = link.find('h4')
+                    name = name_tag.get_text(strip=True) if name_tag else "Unknown Bond"
                     
                     new_bonds.append({'name': name, 'url': href})
                     existing_urls.add(href)
             
             return new_bonds
-        except requests.RequestException as e:
-            logger.error(f"Failed to fetch homepage content: {e}")
+        except TimeoutException:
+            logger.error("Timed out waiting for bond links to load on the homepage. The page structure might have changed.")
             return []
         except Exception as e:
             logger.error(f"An error occurred during homepage scraping: {e}")
@@ -139,6 +148,8 @@ class StablebondsScraper:
         """Gets all URLs from the sheet for scraping, including row numbers."""
         try:
             logger.info("Fetching all URLs from sheet for detailed scraping...")
+            # Get display text from Column A to use in the HYPERLINK formula
+            display_texts = self.worksheet.col_values(1)[1:] # Get all names from column A, skipping header
             all_formulas = self.worksheet.get('B2:B', value_render_option='FORMULA')
             
             url_data = []
@@ -156,7 +167,9 @@ class StablebondsScraper:
                     url = cell_content
 
                 if url:
-                    url_data.append({'row': row_num, 'url': url})
+                    # Get the corresponding name from column A for this row
+                    display_name = display_texts[index] if index < len(display_texts) else "Link"
+                    url_data.append({'row': row_num, 'url': url, 'name': display_name})
             
             logger.info(f"Retrieved {len(url_data)} URLs for detailed scraping.")
             return url_data
@@ -243,7 +256,7 @@ class StablebondsScraper:
                 self.worksheet.update_cell(row_num, next_data_col_index, value_to_write)
                 time.sleep(1) 
             
-            # === PART 3: AUTOMATED ANALYSIS (RESTORED) ===
+            # === PART 3: AUTOMATED ANALYSIS ===
             updated_header_row = self.worksheet.row_values(1)
             data_columns = [i for i, h in enumerate(updated_header_row, 1) if h and h.startswith("Data (")]
             
