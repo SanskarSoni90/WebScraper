@@ -84,18 +84,18 @@ class BondAlertSystem:
                 for row_idx, value in enumerate(column_values):
                     if value and value != '':
                         try:
-                            # Parse the value (could be price difference)
-                            price_diff = float(value)
+                            # Parse the value (already contains face value multiplication from sheet)
+                            change_value = float(value)
                             
-                            # Get face value for this bond
+                            # The hourly change column already has face value multiplication
+                            adjusted_volume += change_value
+                            
+                            # For raw volume, divide back by face value to get price difference
                             face_value = float(face_values[row_idx]) if row_idx < len(face_values) and face_values[row_idx] else 1
+                            if face_value != 0:
+                                raw_volume += (change_value / face_value)
                             
-                            # Raw volume is just the price difference
-                            raw_volume += price_diff
-                            
-                            # Adjusted volume is price difference * face value
-                            adjusted_volume += (price_diff * face_value)
-                        except (ValueError, TypeError) as e:
+                        except (ValueError, TypeError, ZeroDivisionError) as e:
                             continue
                 
                 column_count += 1
@@ -174,13 +174,12 @@ class BondAlertSystem:
     def send_24hr_11am_alert(self):
         """Alert 1: Last 24hrs volume (previous day 11am to today 11am)"""
         now = datetime.now(self.ist_tz)
-        end_time = now.replace(hour=11, minute=0, second=0, microsecond=0)
-        start_time = end_time - timedelta(days=1)
         
-        # If current time is before 11:30 AM, use yesterday's 11 AM
-        if now.hour < 11 or (now.hour == 11 and now.minute < 30):
-            end_time = end_time - timedelta(days=1)
-            start_time = start_time - timedelta(days=1)
+        # Use current time as end_time for more accurate "up to now" calculation
+        end_time = now
+        
+        # Start from 24 hours ago
+        start_time = now - timedelta(hours=24)
         
         logger.info(f"Calculating 24hr volume (11am-11am): {start_time} to {end_time}")
         volume_data = self.calculate_volume(start_time, end_time)
@@ -189,55 +188,55 @@ class BondAlertSystem:
     def send_24hr_6pm_alert(self):
         """Alert 2: Last 24hrs volume (previous day 6pm to today 6pm)"""
         now = datetime.now(self.ist_tz)
-        end_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
-        start_time = end_time - timedelta(days=1)
         
-        # If current time is before 6:30 PM, use yesterday's 6 PM
-        if now.hour < 18 or (now.hour == 18 and now.minute < 30):
-            end_time = end_time - timedelta(days=1)
-            start_time = start_time - timedelta(days=1)
+        # Use current time as end_time for more accurate "up to now" calculation
+        end_time = now
+        
+        # Start from 24 hours ago
+        start_time = now - timedelta(hours=24)
         
         logger.info(f"Calculating 24hr volume (6pm-6pm): {start_time} to {end_time}")
         volume_data = self.calculate_volume(start_time, end_time)
         self.send_slack_alert("24hr Volume Report (6 PM - 6 PM)", volume_data)
 
     def send_mtd_alert(self):
-        """Alert 3: MTD volume (1st day of month 11am to current 11am)"""
+        """Alert 3: MTD volume (1st day of month 11am to current time)"""
         now = datetime.now(self.ist_tz)
         
         # Start from 1st of current month at 11 AM
         start_time = now.replace(day=1, hour=11, minute=0, second=0, microsecond=0)
         
-        # End at today's 11 AM (or yesterday's if before 11:30 AM today)
-        end_time = now.replace(hour=11, minute=0, second=0, microsecond=0)
-        if now.hour < 11 or (now.hour == 11 and now.minute < 30):
-            end_time = end_time - timedelta(days=1)
+        # End at current time (not fixed to 11 AM)
+        end_time = now
         
         logger.info(f"Calculating MTD volume: {start_time} to {end_time}")
         volume_data = self.calculate_volume(start_time, end_time)
         self.send_slack_alert("Month-to-Date (MTD) Volume Report", volume_data)
 
     def run_scheduled_alerts(self):
-        """Determine which alert to run based on current time"""
+        """Determine which alert to run based on current time - flexible timing"""
         now = datetime.now(self.ist_tz)
         current_hour = now.hour
         current_minute = now.minute
         
         logger.info(f"Current time: {now.strftime('%Y-%m-%d %I:%M %p IST')}")
         
-        # Alert 1 & 3: Run at 11:30 AM
-        if current_hour == 11 and 30 <= current_minute < 35:
-            logger.info("Running 11:30 AM alerts...")
-            self.send_24hr_11am_alert()
-            self.send_mtd_alert()
+        # Alert 1 & 3: Run around 11 AM (10:45 AM to 11:45 AM window)
+        if 10 <= current_hour <= 11:
+            if (current_hour == 10 and current_minute >= 45) or (current_hour == 11 and current_minute <= 45):
+                logger.info("Running 11 AM window alerts...")
+                self.send_24hr_11am_alert()
+                self.send_mtd_alert()
+                return
         
-        # Alert 2: Run at 6:30 PM
-        elif current_hour == 18 and 30 <= current_minute < 35:
-            logger.info("Running 6:30 PM alert...")
-            self.send_24hr_6pm_alert()
+        # Alert 2: Run around 6 PM (5:45 PM to 6:45 PM window)
+        if 17 <= current_hour <= 18:
+            if (current_hour == 17 and current_minute >= 45) or (current_hour == 18 and current_minute <= 45):
+                logger.info("Running 6 PM window alert...")
+                self.send_24hr_6pm_alert()
+                return
         
-        else:
-            logger.info(f"No scheduled alerts for current time: {current_hour}:{current_minute:02d}")
+        logger.info(f"No scheduled alerts for current time: {current_hour}:{current_minute:02d}")
 
 def main():
     """Main function to run alerts"""
