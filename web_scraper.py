@@ -81,21 +81,39 @@ class StablebondsScraper:
         """Gets all existing URLs from Column B to prevent duplicates by parsing HYPERLINK formulas."""
         try:
             logger.info("Fetching existing URLs from the sheet...")
-            formulas = self.worksheet.get('B2:B', value_render_option='FORMULA')
+            
+            # Get all data from column B
+            all_data = self.worksheet.get('B2:B', value_render_option='FORMULA')
             
             urls = set()
-            for cell in formulas:
-                if not cell: continue
+            skipped_count = 0
+            
+            for index, cell in enumerate(all_data):
+                row_num = index + 2
+                
+                if not cell or len(cell) == 0 or not cell[0]:
+                    skipped_count += 1
+                    continue
+                    
                 cell_content = cell[0]
                 
                 if '=HYPERLINK' in str(cell_content).upper():
                     match = re.search(r'=HYPERLINK\("([^"]+)"', cell_content, re.IGNORECASE)
                     if match:
                         urls.add(match.group(1))
+                    else:
+                        logger.warning(f"Row {row_num}: Could not parse HYPERLINK formula: {cell_content}")
                 elif str(cell_content).startswith('http'):
                     urls.add(cell_content)
+                else:
+                    logger.warning(f"Row {row_num}: Cell content is not a URL or HYPERLINK: {cell_content}")
             
-            logger.info(f"Found {len(urls)} existing unique URLs.")
+            logger.info(f"Found {len(urls)} existing unique URLs (skipped {skipped_count} empty cells).")
+            
+            # Additional verification
+            total_cells_b = len(self.worksheet.col_values(2)) - 1  # Minus header
+            logger.info(f"Total rows with data in column B (including empty): {total_cells_b}")
+            
             return urls
         except Exception as e:
             logger.error(f"Error fetching URLs from sheet: {e}")
@@ -128,7 +146,6 @@ class StablebondsScraper:
                     continue
 
                 if href not in existing_urls:
-                    # *** MODIFIED LOGIC HERE ***
                     # Find the <h4> tag inside the link to get the display name
                     name_tag = link.find('h4')
                     name = name_tag.get_text(strip=True) if name_tag else "Unknown Bond"
@@ -148,30 +165,49 @@ class StablebondsScraper:
         """Gets all URLs from the sheet for scraping, including row numbers."""
         try:
             logger.info("Fetching all URLs from sheet for detailed scraping...")
-            # Get display text from Column A to use in the HYPERLINK formula
-            display_texts = self.worksheet.col_values(1)[1:] # Get all names from column A, skipping header
-            all_formulas = self.worksheet.get('B2:B', value_render_option='FORMULA')
+            
+            # Get all data from columns A and B at once
+            all_data = self.worksheet.get('A2:B', value_render_option='FORMULA')
             
             url_data = []
-            for index, formula_cell in enumerate(all_formulas):
+            for index, row in enumerate(all_data):
                 row_num = index + 2
-                if not formula_cell: continue
                 
-                cell_content = formula_cell[0]
-                url = None
+                # Skip completely empty rows
+                if not row or len(row) == 0:
+                    continue
                 
-                if '=HYPERLINK' in str(cell_content).upper():
-                    match = re.search(r'=HYPERLINK\("([^"]+)"', cell_content, re.IGNORECASE)
-                    if match: url = match.group(1)
-                elif str(cell_content).startswith('http'):
-                    url = cell_content
-
-                if url:
-                    # Get the corresponding name from column A for this row
-                    display_name = display_texts[index] if index < len(display_texts) else "Link"
-                    url_data.append({'row': row_num, 'url': url, 'name': display_name})
+                # Get name from column A
+                display_name = row[0] if len(row) > 0 and row[0] else f"Bond {row_num}"
+                
+                # Get URL from column B
+                if len(row) > 1 and row[1]:
+                    cell_content = row[1]
+                    url = None
+                    
+                    if '=HYPERLINK' in str(cell_content).upper():
+                        match = re.search(r'=HYPERLINK\("([^"]+)"', cell_content, re.IGNORECASE)
+                        if match: 
+                            url = match.group(1)
+                    elif str(cell_content).startswith('http'):
+                        url = cell_content
+                    
+                    if url:
+                        url_data.append({'row': row_num, 'url': url, 'name': display_name})
+                        logger.debug(f"Row {row_num}: {display_name} -> {url}")
+                else:
+                    logger.warning(f"Row {row_num} has name '{display_name}' but no URL in column B")
             
-            logger.info(f"Retrieved {len(url_data)} URLs for detailed scraping.")
+            logger.info(f"Retrieved {len(url_data)} URLs for detailed scraping (expected around 116).")
+            
+            # Additional check: Get total non-empty rows in column B
+            all_col_b = self.worksheet.col_values(2)
+            non_empty_b = [cell for cell in all_col_b[1:] if cell and cell.strip()]
+            logger.info(f"Total non-empty cells in column B: {len(non_empty_b)}")
+            
+            if len(url_data) < len(non_empty_b):
+                logger.warning(f"Mismatch detected! Found {len(url_data)} parseable URLs but {len(non_empty_b)} non-empty cells in column B")
+            
             return url_data
         except Exception as e:
             logger.error(f"Error getting URLs from sheet: {e}")
@@ -221,16 +257,16 @@ class StablebondsScraper:
                 logger.info(f"Found {len(new_bonds)} new bonds to add to the sheet.")
                 rows_to_append = []
                 for bond in new_bonds:
-                    # Format: [Name, URL (as formula), Placeholder for Face Value]
+                    # FIXED: Only add to columns A and B (Name and URL), no Column C
                     row = [
-                        bond['name'],
-                        f'=HYPERLINK("{bond["url"]}", "{bond["name"]}")',
-                        '' # Leave Column C blank for manual entry
+                        bond['name'],                                              # Column A: Name
+                        f'=HYPERLINK("{bond["url"]}", "{bond["name"]}")'          # Column B: URL as hyperlink
                     ]
                     rows_to_append.append(row)
                 
+                # Append only to columns A and B
                 self.worksheet.append_rows(rows_to_append, value_input_option='USER_ENTERED')
-                logger.info("Successfully added new bonds to the Google Sheet.")
+                logger.info("Successfully added new bonds to columns A and B only.")
             else:
                 logger.info("No new bonds found on the homepage.")
 
@@ -298,7 +334,7 @@ class StablebondsScraper:
                 logger.info(f"Added '{diff_header}' column at index {diff_col_index}.")
                 
                 # Add SUM formula at the bottom
-                data_end_row = row_num + 1  # Last row with data
+                data_end_row = len(url_infos) + 1  # Last row with data
                 total_row_index = data_end_row + 2  # Skip one row, then add TOTAL
                 sum_formula = f"=SUM({diff_col_letter}2:{diff_col_letter}{data_end_row})"
                 self.worksheet.update_cell(total_row_index, diff_col_index, sum_formula)
