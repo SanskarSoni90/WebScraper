@@ -7,6 +7,7 @@ import json
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Tuple
 import re
+import os
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -242,7 +243,14 @@ def main():
     """Main function to run alerts"""
     CREDENTIALS_PATH = 'service_account.json'
     SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/1dIFvqToTTF0G9qyRy6dSdAtVOU763K0N3iOLkp0iWJY/edit?gid=0#gid=0'
-    SLACK_WEBHOOK_URL = 'https://hooks.slack.com/services/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'
+    
+    # Get Slack webhook URL from environment variable
+    SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL')
+    
+    if not SLACK_WEBHOOK_URL:
+        logger.error("SLACK_WEBHOOK_URL environment variable is not set!")
+        logger.error("Please set it using: export SLACK_WEBHOOK_URL='your_webhook_url'")
+        return
     
     try:
         alert_system = BondAlertSystem(CREDENTIALS_PATH, SPREADSHEET_URL, SLACK_WEBHOOK_URL)
