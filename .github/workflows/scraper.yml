@@ -41,5 +41,7 @@ jobs:
         python web_scraper.py
     
     - name: Run alert system
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
       run: |
         python alert_system.py
