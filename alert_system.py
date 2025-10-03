@@ -5,7 +5,7 @@ import logging
 import requests
 import json
 from zoneinfo import ZoneInfo
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import re
 import os
 
@@ -38,92 +38,126 @@ class BondAlertSystem:
             raise
 
     def parse_timestamp_from_header(self, header: str) -> datetime:
-        """Extract timestamp from column header like 'Hourly Change (2025-10-01 12:01)'"""
+        """Extract timestamp from column header like 'Data (2025-10-03 15:50)'"""
         match = re.search(r'\((\d{4}-\d{2}-\d{2} \d{2}:\d{2})\)', header)
         if match:
             return datetime.strptime(match.group(1), "%Y-%m-%d %H:%M").replace(tzinfo=self.ist_tz)
         return None
 
-    def get_hourly_change_columns(self) -> List[Tuple[int, str, datetime]]:
-        """Get all 'Hourly Change' columns with their indices, headers, and timestamps"""
+    def get_data_columns(self) -> List[Tuple[int, str, datetime]]:
+        """Get all 'Data' columns with their indices, headers, and timestamps"""
         headers = self.worksheet.row_values(1)
-        hourly_columns = []
+        data_columns = []
         
         for idx, header in enumerate(headers, 1):
-            if header and header.startswith("Hourly Change"):
+            if header and header.startswith("Data"):
                 timestamp = self.parse_timestamp_from_header(header)
                 if timestamp:
-                    hourly_columns.append((idx, header, timestamp))
+                    data_columns.append((idx, header, timestamp))
         
-        return sorted(hourly_columns, key=lambda x: x[2])
+        return sorted(data_columns, key=lambda x: x[2])
 
-    def calculate_volume(self, start_time: datetime, end_time: datetime) -> Dict[str, float]:
+    def find_closest_data_column(self, target_time: datetime, window_minutes: int = 60) -> Optional[Tuple[int, str, datetime]]:
         """
-        Calculate volume (sum of hourly changes) between two timestamps.
-        Returns both raw price volume and face value-adjusted volume.
+        Find the Data column closest to the target time within a time window.
+        window_minutes: Look for data within ± this many minutes from target
         """
-        hourly_columns = self.get_hourly_change_columns()
-        face_values = self.worksheet.col_values(3, value_render_option='UNFORMATTED_VALUE')[1:]  # Column C
+        data_columns = self.get_data_columns()
         
-        # Filter columns within the time range
-        relevant_columns = [
-            col for col in hourly_columns 
-            if start_time <= col[2] <= end_time
-        ]
+        closest_column = None
+        min_time_diff = timedelta(days=999)
         
-        logger.info(f"Found {len(relevant_columns)} hourly change columns between {start_time} and {end_time}")
+        for col_idx, col_header, col_time in data_columns:
+            time_diff = abs(col_time - target_time)
+            
+            # Only consider columns within the window
+            if time_diff <= timedelta(minutes=window_minutes) and time_diff < min_time_diff:
+                min_time_diff = time_diff
+                closest_column = (col_idx, col_header, col_time)
         
-        raw_volume = 0
-        adjusted_volume = 0
-        column_count = 0
+        if closest_column:
+            logger.info(f"Found closest column to {target_time}: {closest_column[1]} (diff: {min_time_diff})")
+        else:
+            logger.warning(f"No data column found within {window_minutes} minutes of {target_time}")
         
-        for col_idx, col_header, col_time in relevant_columns:
+        return closest_column
+
+    def calculate_inventory_change(self, start_time: datetime, end_time: datetime) -> Dict:
+        """
+        Calculate net inventory change between two time points.
+        Returns the difference: start_inventory - end_inventory for all bonds.
+        """
+        # Find closest data columns to start and end times
+        start_column = self.find_closest_data_column(start_time, window_minutes=60)
+        end_column = self.find_closest_data_column(end_time, window_minutes=60)
+        
+        if not start_column or not end_column:
+            logger.error("Could not find data columns for the specified time range")
+            return {
+                'net_change': 0,
+                'start_time': start_time,
+                'end_time': end_time,
+                'start_snapshot': None,
+                'end_snapshot': None,
+                'error': 'Data columns not found'
+            }
+        
+        start_col_idx, start_col_header, start_col_time = start_column
+        end_col_idx, end_col_header, end_col_time = end_column
+        
+        # Get inventory values from both columns
+        start_values = self.worksheet.col_values(start_col_idx, value_render_option='UNFORMATTED_VALUE')[1:]
+        end_values = self.worksheet.col_values(end_col_idx, value_render_option='UNFORMATTED_VALUE')[1:]
+        
+        # Calculate net inventory change across all bonds
+        net_change = 0
+        bonds_processed = 0
+        
+        for row_idx in range(min(len(start_values), len(end_values))):
             try:
-                # Get values from this column (skip header)
-                column_values = self.worksheet.col_values(col_idx, value_render_option='UNFORMATTED_VALUE')[1:]
+                start_inv = float(start_values[row_idx]) if start_values[row_idx] and start_values[row_idx] != '' else 0
+                end_inv = float(end_values[row_idx]) if end_values[row_idx] and end_values[row_idx] != '' else 0
                 
-                for row_idx, value in enumerate(column_values):
-                    if value and value != '':
-                        try:
-                            # Parse the value (already contains face value multiplication from sheet)
-                            change_value = float(value)
-                            
-                            # The hourly change column already has face value multiplication
-                            adjusted_volume += change_value
-                            
-                            # For raw volume, divide back by face value to get price difference
-                            face_value = float(face_values[row_idx]) if row_idx < len(face_values) and face_values[row_idx] else 1
-                            if face_value != 0:
-                                raw_volume += (change_value / face_value)
-                            
-                        except (ValueError, TypeError, ZeroDivisionError) as e:
-                            continue
+                # Net change = start - end (positive means inventory decreased/sold)
+                net_change += (start_inv - end_inv)
+                bonds_processed += 1
                 
-                column_count += 1
-            except Exception as e:
-                logger.error(f"Error processing column {col_header}: {e}")
+            except (ValueError, TypeError) as e:
                 continue
         
+        logger.info(f"Calculated inventory change: {net_change} bonds across {bonds_processed} rows")
+        
         return {
-            'raw_volume': raw_volume,
-            'adjusted_volume': adjusted_volume,
-            'column_count': column_count,
-            'start_time': start_time,
-            'end_time': end_time
+            'net_change': net_change,
+            'start_time': start_col_time,
+            'end_time': end_col_time,
+            'start_snapshot': start_col_header,
+            'end_snapshot': end_col_header,
+            'bonds_processed': bonds_processed
         }
 
-    def send_slack_alert(self, alert_type: str, volume_data: Dict):
+    def send_slack_alert(self, alert_type: str, change_data: Dict):
         """Send formatted alert to Slack"""
         try:
-            start_str = volume_data['start_time'].strftime("%Y-%m-%d %I:%M %p")
-            end_str = volume_data['end_time'].strftime("%Y-%m-%d %I:%M %p")
+            if 'error' in change_data:
+                logger.error(f"Cannot send alert due to error: {change_data['error']}")
+                return
             
-            # Format numbers with commas and 2 decimal places
-            raw_vol = volume_data['raw_volume']
-            adj_vol = volume_data['adjusted_volume']
+            start_str = change_data['start_time'].strftime("%Y-%m-%d %I:%M %p")
+            end_str = change_data['end_time'].strftime("%Y-%m-%d %I:%M %p")
             
-            # Create color based on values (green for positive, red for negative)
-            color = "#36a64f" if adj_vol >= 0 else "#ff0000"
+            net_change = change_data['net_change']
+            
+            # Create color based on net change (green for positive/sold, red for negative/bought)
+            color = "#36a64f" if net_change >= 0 else "#ff0000"
+            
+            # Determine direction text
+            if net_change > 0:
+                direction = f"📉 Inventory Decreased (Sold)"
+            elif net_change < 0:
+                direction = f"📈 Inventory Increased (Bought)"
+            else:
+                direction = f"➡️ No Change"
             
             message = {
                 "attachments": [
@@ -137,19 +171,24 @@ class BondAlertSystem:
                                 "short": False
                             },
                             {
-                                "title": "Raw Volume (Price Changes)",
-                                "value": f"{raw_vol:,.2f}",
+                                "title": "Net Inventory Change",
+                                "value": f"{net_change:,.0f} bonds",
                                 "short": True
                             },
                             {
-                                "title": "Adjusted Volume (w/ Face Value)",
-                                "value": f"₹{adj_vol:,.2f}",
+                                "title": "Direction",
+                                "value": direction,
                                 "short": True
                             },
                             {
-                                "title": "Data Points",
-                                "value": f"{volume_data['column_count']} hourly snapshots",
+                                "title": "Data Snapshots Used",
+                                "value": f"Start: {change_data['start_snapshot']}\nEnd: {change_data['end_snapshot']}",
                                 "short": False
+                            },
+                            {
+                                "title": "Bonds Tracked",
+                                "value": f"{change_data['bonds_processed']} bonds",
+                                "short": True
                             }
                         ],
                         "footer": "Stablebonds Monitor",
@@ -173,46 +212,48 @@ class BondAlertSystem:
             logger.error(f"Error sending Slack alert: {e}")
 
     def send_24hr_11am_alert(self):
-        """Alert 1: Last 24hrs volume (previous day 11am to today 11am)"""
+        """Alert 1: 24hr inventory change (yesterday ~11am to today ~11am)"""
         now = datetime.now(self.ist_tz)
         
-        # Use current time as end_time for more accurate "up to now" calculation
-        end_time = now
+        # Target times around 11 AM
+        end_time = now.replace(hour=11, minute=0, second=0, microsecond=0)
+        start_time = end_time - timedelta(days=1)
         
-        # Start from 24 hours ago
-        start_time = now - timedelta(hours=24)
-        
-        logger.info(f"Calculating 24hr volume (11am-11am): {start_time} to {end_time}")
-        volume_data = self.calculate_volume(start_time, end_time)
-        self.send_slack_alert("24hr Volume Report (11 AM - 11 AM)", volume_data)
+        logger.info(f"Calculating 24hr inventory change (11am-11am)")
+        change_data = self.calculate_inventory_change(start_time, end_time)
+        self.send_slack_alert("24hr Inventory Change (11 AM - 11 AM)", change_data)
 
     def send_24hr_6pm_alert(self):
-        """Alert 2: Last 24hrs volume (previous day 6pm to today 6pm)"""
+        """Alert 2: 24hr inventory change (yesterday ~6pm to today ~6pm)"""
         now = datetime.now(self.ist_tz)
         
-        # Use current time as end_time for more accurate "up to now" calculation
-        end_time = now
+        # Target times around 6 PM
+        end_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
+        start_time = end_time - timedelta(days=1)
         
-        # Start from 24 hours ago
-        start_time = now - timedelta(hours=24)
-        
-        logger.info(f"Calculating 24hr volume (6pm-6pm): {start_time} to {end_time}")
-        volume_data = self.calculate_volume(start_time, end_time)
-        self.send_slack_alert("24hr Volume Report (6 PM - 6 PM)", volume_data)
+        logger.info(f"Calculating 24hr inventory change (6pm-6pm)")
+        change_data = self.calculate_inventory_change(start_time, end_time)
+        self.send_slack_alert("24hr Inventory Change (6 PM - 6 PM)", change_data)
 
     def send_mtd_alert(self):
-        """Alert 3: MTD volume (1st day of month 11am to current time)"""
+        """Alert 3: MTD inventory change (1st of month ~11am to current time)"""
         now = datetime.now(self.ist_tz)
+        current_hour = now.hour
         
         # Start from 1st of current month at 11 AM
         start_time = now.replace(day=1, hour=11, minute=0, second=0, microsecond=0)
         
-        # End at current time (not fixed to 11 AM)
-        end_time = now
+        # End time depends on when this is called (11 AM or 6 PM)
+        if 10 <= current_hour <= 11:
+            end_time = now.replace(hour=11, minute=0, second=0, microsecond=0)
+            alert_suffix = "11 AM"
+        else:  # 6 PM window
+            end_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
+            alert_suffix = "6 PM"
         
-        logger.info(f"Calculating MTD volume: {start_time} to {end_time}")
-        volume_data = self.calculate_volume(start_time, end_time)
-        self.send_slack_alert("Month-to-Date (MTD) Volume Report", volume_data)
+        logger.info(f"Calculating MTD inventory change: {start_time} to {end_time}")
+        change_data = self.calculate_inventory_change(start_time, end_time)
+        self.send_slack_alert(f"Month-to-Date Inventory Change (as of {alert_suffix})", change_data)
 
     def run_scheduled_alerts(self):
         """Determine which alert to run based on current time - flexible timing"""
@@ -235,6 +276,7 @@ class BondAlertSystem:
             if (current_hour == 17 and current_minute >= 45) or (current_hour == 18 and current_minute <= 45):
                 logger.info("Running 6 PM window alert...")
                 self.send_24hr_6pm_alert()
+                self.send_mtd_alert()
                 return
         
         logger.info(f"No scheduled alerts for current time: {current_hour}:{current_minute:02d}")
