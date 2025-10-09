@@ -84,8 +84,8 @@ class BondAlertSystem:
 
     def calculate_inventory_change(self, start_time: datetime, end_time: datetime) -> Dict:
         """
-        Calculate net inventory change between two time points.
-        Returns the difference: start_inventory - end_inventory for all bonds.
+        Calculate net volume change between two time points.
+        Returns the difference: (start_inventory - end_inventory) * face_value for all bonds.
         """
         # Find closest data columns to start and end times
         start_column = self.find_closest_data_column(start_time, window_minutes=60)
@@ -105,30 +105,39 @@ class BondAlertSystem:
         start_col_idx, start_col_header, start_col_time = start_column
         end_col_idx, end_col_header, end_col_time = end_column
         
+        # Get face value column (Column C, index 3)
+        face_values = self.worksheet.col_values(3, value_render_option='UNFORMATTED_VALUE')[1:]
+        
         # Get inventory values from both columns
         start_values = self.worksheet.col_values(start_col_idx, value_render_option='UNFORMATTED_VALUE')[1:]
         end_values = self.worksheet.col_values(end_col_idx, value_render_option='UNFORMATTED_VALUE')[1:]
         
-        # Calculate net inventory change across all bonds
-        net_change = 0
+        # Calculate net volume change across all bonds
+        net_volume_change = 0
         bonds_processed = 0
         
-        for row_idx in range(min(len(start_values), len(end_values))):
+        for row_idx in range(min(len(start_values), len(end_values), len(face_values))):
             try:
                 start_inv = float(start_values[row_idx]) if start_values[row_idx] and start_values[row_idx] != '' else 0
                 end_inv = float(end_values[row_idx]) if end_values[row_idx] and end_values[row_idx] != '' else 0
+                face_value = float(face_values[row_idx]) if face_values[row_idx] and face_values[row_idx] != '' else 0
                 
-                # Net change = start - end (positive means inventory decreased/sold)
-                net_change += (start_inv - end_inv)
+                # Quantity change = start - end (positive means inventory decreased/sold)
+                quantity_change = start_inv - end_inv
+                
+                # Volume change = quantity change * face value
+                volume_change = quantity_change * face_value
+                
+                net_volume_change += volume_change
                 bonds_processed += 1
                 
             except (ValueError, TypeError) as e:
                 continue
         
-        logger.info(f"Calculated inventory change: {net_change} bonds across {bonds_processed} rows")
+        logger.info(f"Calculated volume change: ₹{net_volume_change:,.2f} across {bonds_processed} bonds")
         
         return {
-            'net_change': net_change,
+            'net_change': net_volume_change,
             'start_time': start_col_time,
             'end_time': end_col_time,
             'start_snapshot': start_col_header,
@@ -153,11 +162,26 @@ class BondAlertSystem:
             
             # Determine direction text
             if net_change > 0:
-                direction = f"📉 Inventory Decreased (Sold)"
+                direction = f"📉 Volume Decreased (Sold)"
             elif net_change < 0:
-                direction = f"📈 Inventory Increased (Bought)"
+                direction = f"📈 Volume Increased (Bought)"
             else:
                 direction = f"➡️ No Change"
+            
+            # Format the volume with Indian numbering system
+            def format_indian_currency(amount):
+                """Format currency in Indian style (Lakhs/Crores)"""
+                abs_amount = abs(amount)
+                sign = "-" if amount < 0 else ""
+                
+                if abs_amount >= 10000000:  # Crores
+                    return f"{sign}₹{abs_amount/10000000:,.2f} Cr"
+                elif abs_amount >= 100000:  # Lakhs
+                    return f"{sign}₹{abs_amount/100000:,.2f} L"
+                else:
+                    return f"{sign}₹{abs_amount:,.2f}"
+            
+            formatted_change = format_indian_currency(net_change)
             
             message = {
                 "attachments": [
@@ -171,8 +195,8 @@ class BondAlertSystem:
                                 "short": False
                             },
                             {
-                                "title": "Net Inventory Change",
-                                "value": f"{net_change:,.0f} bonds",
+                                "title": "Net Volume Change",
+                                "value": formatted_change,
                                 "short": True
                             },
                             {
@@ -212,31 +236,31 @@ class BondAlertSystem:
             logger.error(f"Error sending Slack alert: {e}")
 
     def send_24hr_11am_alert(self):
-        """Alert 1: 24hr inventory change (yesterday ~11am to today ~11am)"""
+        """Alert 1: 24hr volume change (yesterday ~11am to today ~11am)"""
         now = datetime.now(self.ist_tz)
         
         # Target times around 11 AM
         end_time = now.replace(hour=11, minute=0, second=0, microsecond=0)
         start_time = end_time - timedelta(days=1)
         
-        logger.info(f"Calculating 24hr inventory change (11am-11am)")
+        logger.info(f"Calculating 24hr volume change (11am-11am)")
         change_data = self.calculate_inventory_change(start_time, end_time)
-        self.send_slack_alert("24hr Inventory Change (11 AM - 11 AM)", change_data)
+        self.send_slack_alert("24hr Volume Change (11 AM - 11 AM)", change_data)
 
     def send_24hr_6pm_alert(self):
-        """Alert 2: 24hr inventory change (yesterday ~6pm to today ~6pm)"""
+        """Alert 2: 24hr volume change (yesterday ~6pm to today ~6pm)"""
         now = datetime.now(self.ist_tz)
         
         # Target times around 6 PM
         end_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
         start_time = end_time - timedelta(days=1)
         
-        logger.info(f"Calculating 24hr inventory change (6pm-6pm)")
+        logger.info(f"Calculating 24hr volume change (6pm-6pm)")
         change_data = self.calculate_inventory_change(start_time, end_time)
-        self.send_slack_alert("24hr Inventory Change (6 PM - 6 PM)", change_data)
+        self.send_slack_alert("24hr Volume Change (6 PM - 6 PM)", change_data)
 
     def send_mtd_alert(self):
-        """Alert 3: MTD inventory change (1st of month ~11am to current time)"""
+        """Alert 3: MTD volume change (1st of month ~11am to current time)"""
         now = datetime.now(self.ist_tz)
         current_hour = now.hour
         
@@ -251,9 +275,9 @@ class BondAlertSystem:
             end_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
             alert_suffix = "6 PM"
         
-        logger.info(f"Calculating MTD inventory change: {start_time} to {end_time}")
+        logger.info(f"Calculating MTD volume change: {start_time} to {end_time}")
         change_data = self.calculate_inventory_change(start_time, end_time)
-        self.send_slack_alert(f"Month-to-Date Inventory Change (as of {alert_suffix})", change_data)
+        self.send_slack_alert(f"Month-to-Date Volume Change (as of {alert_suffix})", change_data)
 
     def run_scheduled_alerts(self):
         """Determine which alert to run based on current time - flexible timing"""
