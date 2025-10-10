@@ -145,7 +145,93 @@ class BondAlertSystem:
             'bonds_processed': bonds_processed
         }
 
-    def send_slack_alert(self, alert_type: str, change_data: Dict):
+    def calculate_mtd_volume(self, end_time: datetime) -> Dict:
+        """
+        Calculate cumulative MTD volume by summing all daily changes from 1st of month to end_time.
+        This captures true trading volume, not just net position change.
+        """
+        now = datetime.now(self.ist_tz)
+        
+        # Start from 1st of current month
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        # Get all data columns in the current month up to end_time
+        all_columns = self.get_data_columns()
+        month_columns = [
+            (idx, header, ts) for idx, header, ts in all_columns
+            if month_start <= ts <= end_time
+        ]
+        
+        if len(month_columns) < 2:
+            logger.warning("Not enough data columns in current month for MTD calculation")
+            return {
+                'net_change': 0,
+                'start_time': month_start,
+                'end_time': end_time,
+                'error': 'Insufficient data for MTD calculation',
+                'snapshots_used': len(month_columns)
+            }
+        
+        # Sort by timestamp
+        month_columns.sort(key=lambda x: x[2])
+        
+        logger.info(f"Calculating MTD volume using {len(month_columns)} snapshots from {month_columns[0][2]} to {month_columns[-1][2]}")
+        
+        # Get face values
+        face_values = self.worksheet.col_values(3, value_render_option='UNFORMATTED_VALUE')[1:]
+        
+        cumulative_volume = 0
+        bonds_processed = 0
+        snapshots_processed = 0
+        
+        # Calculate cumulative changes between consecutive snapshots
+        for i in range(len(month_columns) - 1):
+            prev_col_idx, prev_header, prev_time = month_columns[i]
+            curr_col_idx, curr_header, curr_time = month_columns[i + 1]
+            
+            prev_values = self.worksheet.col_values(prev_col_idx, value_render_option='UNFORMATTED_VALUE')[1:]
+            curr_values = self.worksheet.col_values(curr_col_idx, value_render_option='UNFORMATTED_VALUE')[1:]
+            
+            snapshot_volume = 0
+            
+            for row_idx in range(min(len(prev_values), len(curr_values), len(face_values))):
+                try:
+                    prev_inv = float(prev_values[row_idx]) if prev_values[row_idx] and prev_values[row_idx] != '' else 0
+                    curr_inv = float(curr_values[row_idx]) if curr_values[row_idx] and curr_values[row_idx] != '' else 0
+                    face_value = float(face_values[row_idx]) if face_values[row_idx] and face_values[row_idx] != '' else 0
+                    
+                    # Quantity change between snapshots
+                    quantity_change = prev_inv - curr_inv
+                    
+                    # Volume change
+                    volume_change = quantity_change * face_value
+                    
+                    snapshot_volume += volume_change
+                    
+                    if i == 0:  # Count bonds only once
+                        bonds_processed += 1
+                    
+                except (ValueError, TypeError):
+                    continue
+            
+            cumulative_volume += snapshot_volume
+            snapshots_processed += 1
+            logger.info(f"Snapshot {i+1}: {prev_time.strftime('%Y-%m-%d %H:%M')} → {curr_time.strftime('%Y-%m-%d %H:%M')}: ₹{snapshot_volume:,.2f}")
+        
+        logger.info(f"Total MTD cumulative volume: ₹{cumulative_volume:,.2f} across {snapshots_processed} intervals")
+        
+        return {
+            'net_change': cumulative_volume,
+            'start_time': month_columns[0][2],
+            'end_time': month_columns[-1][2],
+            'start_snapshot': month_columns[0][1],
+            'end_snapshot': month_columns[-1][1],
+            'bonds_processed': bonds_processed,
+            'snapshots_used': len(month_columns),
+            'intervals_calculated': snapshots_processed
+        }
+
+    def send_slack_alert(self, alert_type: str, change_data: Dict, is_mtd: bool = False):
         """Send formatted alert to Slack"""
         try:
             if 'error' in change_data:
@@ -183,38 +269,48 @@ class BondAlertSystem:
             
             formatted_change = format_indian_currency(net_change)
             
+            fields = [
+                {
+                    "title": "Time Period",
+                    "value": f"{start_str}\n→ {end_str}",
+                    "short": False
+                },
+                {
+                    "title": "Net Volume Change" if not is_mtd else "Cumulative MTD Volume",
+                    "value": formatted_change,
+                    "short": True
+                },
+                {
+                    "title": "Direction",
+                    "value": direction,
+                    "short": True
+                },
+                {
+                    "title": "Data Snapshots Used",
+                    "value": f"Start: {change_data['start_snapshot']}\nEnd: {change_data['end_snapshot']}",
+                    "short": False
+                },
+                {
+                    "title": "Bonds Tracked",
+                    "value": f"{change_data['bonds_processed']} bonds",
+                    "short": True
+                }
+            ]
+            
+            # Add MTD-specific info
+            if is_mtd and 'snapshots_used' in change_data:
+                fields.append({
+                    "title": "Calculation Method",
+                    "value": f"Cumulative across {change_data['intervals_calculated']} intervals using {change_data['snapshots_used']} snapshots",
+                    "short": False
+                })
+            
             message = {
                 "attachments": [
                     {
                         "color": color,
                         "title": f"🔔 {alert_type}",
-                        "fields": [
-                            {
-                                "title": "Time Period",
-                                "value": f"{start_str}\n→ {end_str}",
-                                "short": False
-                            },
-                            {
-                                "title": "Net Volume Change",
-                                "value": formatted_change,
-                                "short": True
-                            },
-                            {
-                                "title": "Direction",
-                                "value": direction,
-                                "short": True
-                            },
-                            {
-                                "title": "Data Snapshots Used",
-                                "value": f"Start: {change_data['start_snapshot']}\nEnd: {change_data['end_snapshot']}",
-                                "short": False
-                            },
-                            {
-                                "title": "Bonds Tracked",
-                                "value": f"{change_data['bonds_processed']} bonds",
-                                "short": True
-                            }
-                        ],
+                        "fields": fields,
                         "footer": "Stablebonds Monitor",
                         "ts": int(datetime.now(self.ist_tz).timestamp())
                     }
@@ -260,12 +356,9 @@ class BondAlertSystem:
         self.send_slack_alert("24hr Volume Change (6 PM - 6 PM)", change_data)
 
     def send_mtd_alert(self):
-        """Alert 3: MTD volume change (1st of month ~11am to current time)"""
+        """Alert 3: MTD cumulative volume change (all daily changes from 1st of month to now)"""
         now = datetime.now(self.ist_tz)
         current_hour = now.hour
-        
-        # Start from 1st of current month at 11 AM
-        start_time = now.replace(day=1, hour=11, minute=0, second=0, microsecond=0)
         
         # End time depends on when this is called (11 AM or 6 PM)
         if 10 <= current_hour <= 11:
@@ -275,9 +368,9 @@ class BondAlertSystem:
             end_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
             alert_suffix = "6 PM"
         
-        logger.info(f"Calculating MTD volume change: {start_time} to {end_time}")
-        change_data = self.calculate_inventory_change(start_time, end_time)
-        self.send_slack_alert(f"Month-to-Date Volume Change (as of {alert_suffix})", change_data)
+        logger.info(f"Calculating MTD cumulative volume up to {end_time}")
+        change_data = self.calculate_mtd_volume(end_time)
+        self.send_slack_alert(f"Month-to-Date Cumulative Volume (as of {alert_suffix})", change_data, is_mtd=True)
 
     def run_scheduled_alerts(self):
         """Determine which alert to run based on current time - flexible timing"""
