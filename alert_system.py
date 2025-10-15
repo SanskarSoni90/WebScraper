@@ -433,6 +433,7 @@ class BondAlertSystem:
         if (current_hour == 20 and current_minute >= 30) or (current_hour == 21 and current_minute <= 30):
             logger.info("Running 6 PM window alert...")
             self.send_24hr_6pm_alert()
+            self.send_mtd_alert()
             return
         
         logger.info(f"No scheduled alerts for current time: {now.strftime('%I:%M %p')}")
