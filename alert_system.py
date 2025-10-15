@@ -35,6 +35,8 @@ class BondAlertSystem:
             logger.info("Google Sheets connection established successfully")
         except Exception as e:
             logger.error(f"Error setting up Google Sheets: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             raise
 
     def parse_timestamp_from_header(self, header: str) -> Optional[datetime]:
@@ -387,6 +389,7 @@ class BondAlertSystem:
         """Determine which alert to run based on current time - flexible timing"""
         now = datetime.now(self.ist_tz)
         current_hour = now.hour
+        current_minute = now.minute
         
         logger.info(f"Current time: {now.strftime('%Y-%m-%d %I:%M %p IST')}")
         
@@ -404,14 +407,25 @@ class BondAlertSystem:
             self.send_mtd_alert()
             return
         
+        # Window for 7:10 PM test alerts (runs between 7:05 PM and 7:15 PM)
+        if current_hour == 19 and 5 <= current_minute <= 15:
+            logger.info("Running 7:10 PM test alerts...")
+            self.send_24hr_6pm_alert()
+            self.send_mtd_alert()
+            return
+        
         logger.info(f"No scheduled alerts for current time: {now.strftime('%I:%M %p')}")
 
 def main():
     """Main function to run alerts"""
-    CREDENTIALS_PATH = os.environ.get('GOOGLE_CREDENTIALS')
-    SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/1dIFvqToTTF0G9qyRy6dSdAtVOU763K0N3iOLkp0iWJY/edit?gid=0#gid=0E' # Replace with your actual URL
+    CREDENTIALS_PATH = os.environ.get('GOOGLE_CREDENTIALS', 'service_account.json')
+    SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/1dIFvqToTTF0G9qyRy6dSdAtVOU763K0N3iOLkp0iWJY/edit?gid=0#gid=0'
     
     SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL')
+    
+    if not CREDENTIALS_PATH:
+        logger.error("GOOGLE_CREDENTIALS environment variable is not set and no default found!")
+        return
     
     if not SLACK_WEBHOOK_URL:
         logger.error("SLACK_WEBHOOK_URL environment variable is not set!")
@@ -425,6 +439,8 @@ def main():
         logger.error(f"Credentials file not found at '{CREDENTIALS_PATH}'.")
     except Exception as e:
         logger.error(f"An error occurred during alert execution: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 if __name__ == "__main__":
     main()
