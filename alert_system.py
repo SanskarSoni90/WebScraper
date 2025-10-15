@@ -408,7 +408,7 @@ class BondAlertSystem:
             return
         
         # Window for 7:10 PM test alerts (runs between 7:05 PM and 7:15 PM)
-        if current_hour == 19 and 5 <= current_minute <= 15:
+        if current_hour == 19 and 40 <= current_minute <= 50:
             logger.info("Running 7:10 PM test alerts...")
             self.send_24hr_6pm_alert()
             self.send_mtd_alert()
@@ -418,7 +418,7 @@ class BondAlertSystem:
 
 def main():
     """Main function to run alerts"""
-    CREDENTIALS_PATH = os.environ.get('GOOGLE_CREDENTIALS')
+    CREDENTIALS_PATH = os.environ.get('GOOGLE_CREDENTIALS', 'service_account.json')
     SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/1dIFvqToTTF0G9qyRy6dSdAtVOU763K0N3iOLkp0iWJY/edit?gid=0#gid=0'
     
     SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL')
