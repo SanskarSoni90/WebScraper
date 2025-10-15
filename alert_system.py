@@ -87,7 +87,6 @@ class BondAlertSystem:
         Calculate net volume change between two time points.
         Returns the difference: (start_inventory - end_inventory) * face_value for all bonds.
         """
-        # Find closest data columns to start and end times
         start_column = self.find_closest_data_column(start_time, window_minutes=60)
         end_column = self.find_closest_data_column(end_time, window_minutes=60)
         
@@ -105,33 +104,41 @@ class BondAlertSystem:
         start_col_idx, start_col_header, start_col_time = start_column
         end_col_idx, end_col_header, end_col_time = end_column
         
-        # Get face value column (Column C, index 3)
-        face_values = self.worksheet.col_values(3, value_render_option='UNFORMATTED_VALUE')[1:]
-        
-        # Get inventory values from both columns
-        start_values = self.worksheet.col_values(start_col_idx, value_render_option='UNFORMATTED_VALUE')[1:]
-        end_values = self.worksheet.col_values(end_col_idx, value_render_option='UNFORMATTED_VALUE')[1:]
-        
-        # Calculate net volume change across all bonds
+        # ✅ BATCH GET: Fetch all relevant data in one API call
+        try:
+            # Note: gspread uses 1-based indexing for cols, but lists are 0-based.
+            face_value_col_idx = 3
+            all_data = self.worksheet.get_all_values(value_render_option='UNFORMATTED_VALUE')
+            
+            # Extract columns from the local 'all_data' list (slicing [1:] to skip header)
+            all_data_rows = all_data[1:]
+            face_values = [row[face_value_col_idx - 1] for row in all_data_rows]
+            start_values = [row[start_col_idx - 1] for row in all_data_rows]
+            end_values = [row[end_col_idx - 1] for row in all_data_rows]
+            
+        except IndexError:
+            logger.error("A column index was out of range. Check sheet structure.")
+            return {'error': 'Sheet data structure is inconsistent.'}
+        except Exception as e:
+            logger.error(f"Failed to fetch batch data from sheet: {e}")
+            return {'error': f'API data fetch failed: {e}'}
+
         net_volume_change = 0
         bonds_processed = 0
         
         for row_idx in range(min(len(start_values), len(end_values), len(face_values))):
             try:
-                start_inv = float(start_values[row_idx]) if start_values[row_idx] and start_values[row_idx] != '' else 0
-                end_inv = float(end_values[row_idx]) if end_values[row_idx] and end_values[row_idx] != '' else 0
-                face_value = float(face_values[row_idx]) if face_values[row_idx] and face_values[row_idx] != '' else 0
+                start_inv = float(start_values[row_idx]) if start_values[row_idx] else 0
+                end_inv = float(end_values[row_idx]) if end_values[row_idx] else 0
+                face_value = float(face_values[row_idx]) if face_values[row_idx] else 0
                 
-                # Quantity change = start - end (positive means inventory decreased/sold)
                 quantity_change = start_inv - end_inv
-                
-                # Volume change = quantity change * face value
                 volume_change = quantity_change * face_value
                 
                 net_volume_change += volume_change
                 bonds_processed += 1
                 
-            except (ValueError, TypeError) as e:
+            except (ValueError, TypeError):
                 continue
         
         logger.info(f"Calculated volume change: ₹{net_volume_change:,.2f} across {bonds_processed} bonds")
@@ -151,11 +158,8 @@ class BondAlertSystem:
         This captures true trading volume, not just net position change.
         """
         now = datetime.now(self.ist_tz)
-        
-        # Start from 1st of current month
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
-        # Get all data columns in the current month up to end_time
         all_columns = self.get_data_columns()
         month_columns = [
             (idx, header, ts) for idx, header, ts in all_columns
@@ -172,45 +176,53 @@ class BondAlertSystem:
                 'snapshots_used': len(month_columns)
             }
         
-        # Sort by timestamp
         month_columns.sort(key=lambda x: x[2])
         
         logger.info(f"Calculating MTD volume using {len(month_columns)} snapshots from {month_columns[0][2]} to {month_columns[-1][2]}")
-        
-        # Get face values
-        face_values = self.worksheet.col_values(3, value_render_option='UNFORMATTED_VALUE')[1:]
-        
+
+        # ✅ BATCH GET: Fetch all sheet data in ONE API call before the loop
+        try:
+            all_data = self.worksheet.get_all_values(value_render_option='UNFORMATTED_VALUE')
+            all_data_rows = all_data[1:] # Skip header row
+            face_values = [row[2] for row in all_data_rows] # Face value is in column C (index 2)
+        except Exception as e:
+            logger.error(f"Failed to fetch batch data from sheet: {e}")
+            return {'error': f'API data fetch failed: {e}'}
+
         cumulative_volume = 0
         bonds_processed = 0
         snapshots_processed = 0
         
         # Calculate cumulative changes between consecutive snapshots
         for i in range(len(month_columns) - 1):
-            prev_col_idx, prev_header, prev_time = month_columns[i]
-            curr_col_idx, curr_header, curr_time = month_columns[i + 1]
+            prev_col_idx, _, prev_time = month_columns[i]
+            curr_col_idx, _, curr_time = month_columns[i+1]
             
-            prev_values = self.worksheet.col_values(prev_col_idx, value_render_option='UNFORMATTED_VALUE')[1:]
-            curr_values = self.worksheet.col_values(curr_col_idx, value_render_option='UNFORMATTED_VALUE')[1:]
-            
+            # ❌ NO API CALLS HERE! Extract data from the local 'all_data' list.
+            # Remember to subtract 1 for 0-based list indexing.
+            try:
+                prev_values = [row[prev_col_idx - 1] for row in all_data_rows]
+                curr_values = [row[curr_col_idx - 1] for row in all_data_rows]
+            except IndexError:
+                logger.warning(f"Skipping interval due to inconsistent sheet data for columns {prev_col_idx} or {curr_col_idx}")
+                continue
+
             snapshot_volume = 0
             
             for row_idx in range(min(len(prev_values), len(curr_values), len(face_values))):
                 try:
-                    prev_inv = float(prev_values[row_idx]) if prev_values[row_idx] and prev_values[row_idx] != '' else 0
-                    curr_inv = float(curr_values[row_idx]) if curr_values[row_idx] and curr_values[row_idx] != '' else 0
-                    face_value = float(face_values[row_idx]) if face_values[row_idx] and face_values[row_idx] != '' else 0
+                    prev_inv = float(prev_values[row_idx]) if prev_values[row_idx] else 0
+                    curr_inv = float(curr_values[row_idx]) if curr_values[row_idx] else 0
+                    face_value = float(face_values[row_idx]) if face_values[row_idx] else 0
                     
-                    # Quantity change between snapshots
                     quantity_change = prev_inv - curr_inv
-                    
-                    # Volume change
                     volume_change = quantity_change * face_value
                     
                     snapshot_volume += volume_change
                     
-                    if i == 0:  # Count bonds only once
+                    if i == 0:  # Count bonds only on the first pass
                         bonds_processed += 1
-                    
+                        
                 except (ValueError, TypeError):
                     continue
             
@@ -388,7 +400,7 @@ class BondAlertSystem:
                 self.send_mtd_alert()
                 return
         
-        # Alert 2: Run around 6 PM (5:45 PM to 6:45 PM window)
+        # Alert 2 & 3: Run around 6 PM (5:45 PM to 6:45 PM window)
         if 17 <= current_hour <= 18:
             if (current_hour == 17 and current_minute >= 45) or (current_hour == 18 and current_minute <= 45):
                 logger.info("Running 6 PM window alert...")
