@@ -409,7 +409,7 @@ class BondAlertSystem:
 def main():
     """Main function to run alerts"""
     CREDENTIALS_PATH = 'service_account.json'
-    SPREADSHEET_URL = 'YOUR_SPREADSHEET_URL_HERE' # Replace with your actual URL
+    SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/1dIFvqToTTF0G9qyRy6dSdAtVOU763K0N3iOLkp0iWJY/edit?gid=0#gid=0E' # Replace with your actual URL
     
     SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL')
     
