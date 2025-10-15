@@ -153,6 +153,7 @@ class BondAlertSystem:
     def calculate_mtd_volume(self, end_time: datetime) -> Dict:
         """
         Calculate cumulative MTD volume by summing the changes between the ~11 AM snapshot of each day.
+        Returns breakdown of daily changes.
         """
         now = datetime.now(self.ist_tz)
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -206,6 +207,7 @@ class BondAlertSystem:
         cumulative_volume = 0
         bonds_processed = 0
         snapshots_processed = 0
+        daily_breakdown = []
         
         # 5. Calculate cumulative changes between consecutive daily 11 AM snapshots
         for i in range(len(daily_11am_columns) - 1):
@@ -240,6 +242,14 @@ class BondAlertSystem:
             
             cumulative_volume += snapshot_volume
             snapshots_processed += 1
+            
+            # Store daily breakdown
+            daily_breakdown.append({
+                'prev_date': prev_time.strftime('%b %d'),
+                'curr_date': curr_time.strftime('%b %d'),
+                'change': snapshot_volume
+            })
+            
             logger.info(f"Day-to-Day Change {i+1}: {prev_time.strftime('%b %d')} → {curr_time.strftime('%b %d')}: ₹{snapshot_volume:,.2f}")
         
         logger.info(f"Total MTD cumulative volume: ₹{cumulative_volume:,.2f} across {snapshots_processed} daily intervals")
@@ -252,9 +262,21 @@ class BondAlertSystem:
             'end_snapshot': daily_11am_columns[-1][1],
             'bonds_processed': bonds_processed,
             'snapshots_used': len(daily_11am_columns),
-            'intervals_calculated': snapshots_processed
+            'intervals_calculated': snapshots_processed,
+            'daily_breakdown': daily_breakdown
         }
 
+    def format_indian_currency(self, amount):
+        """Format currency in Indian style (Lakhs/Crores)"""
+        abs_amount = abs(amount)
+        sign = "-" if amount < 0 else ""
+        
+        if abs_amount >= 10000000:  # Crores
+            return f"{sign}₹{abs_amount/10000000:,.2f} Cr"
+        elif abs_amount >= 100000:  # Lakhs
+            return f"{sign}₹{abs_amount/100000:,.2f} L"
+        else:
+            return f"{sign}₹{abs_amount:,.2f}"
 
     def send_slack_alert(self, alert_type: str, change_data: Dict, is_mtd: bool = False):
         """Send formatted alert to Slack"""
@@ -277,19 +299,7 @@ class BondAlertSystem:
             else:
                 direction = "➡️ No Change"
             
-            def format_indian_currency(amount):
-                """Format currency in Indian style (Lakhs/Crores)"""
-                abs_amount = abs(amount)
-                sign = "-" if amount < 0 else ""
-                
-                if abs_amount >= 10000000:  # Crores
-                    return f"{sign}₹{abs_amount/10000000:,.2f} Cr"
-                elif abs_amount >= 100000:  # Lakhs
-                    return f"{sign}₹{abs_amount/100000:,.2f} L"
-                else:
-                    return f"{sign}₹{abs_amount:,.2f}"
-            
-            formatted_change = format_indian_currency(net_change)
+            formatted_change = self.format_indian_currency(net_change)
             
             fields = [
                 {
@@ -323,6 +333,20 @@ class BondAlertSystem:
                 fields.append({
                     "title": "Calculation Method",
                     "value": f"Cumulative across {change_data['intervals_calculated']} daily intervals using {change_data['snapshots_used']} snapshots",
+                    "short": False
+                })
+            
+            # Add daily breakdown for MTD alerts
+            if is_mtd and 'daily_breakdown' in change_data and change_data['daily_breakdown']:
+                breakdown_lines = []
+                for day_data in change_data['daily_breakdown']:
+                    formatted_amount = self.format_indian_currency(day_data['change'])
+                    breakdown_lines.append(f"{day_data['prev_date']} → {day_data['curr_date']}: {formatted_amount}")
+                
+                breakdown_text = "\n".join(breakdown_lines)
+                fields.append({
+                    "title": "📊 Daily Breakdown",
+                    "value": breakdown_text,
                     "short": False
                 })
             
@@ -375,10 +399,10 @@ class BondAlertSystem:
         self.send_slack_alert("24hr Volume Change (6 PM - 6 PM)", change_data)
 
     def send_mtd_alert(self):
-        """Alert 3: MTD cumulative volume change (all daily changes from 1st of month to now)"""
+        """Alert 3: MTD cumulative volume change with daily breakdown"""
         now = datetime.now(self.ist_tz)
         
-        end_time = now.replace(hour=23, minute=59, second=59) # Ensure we get all of today's snapshots
+        end_time = now.replace(hour=23, minute=59, second=59)
         alert_suffix = now.strftime("%I %p")
 
         logger.info(f"Calculating MTD cumulative volume up to {end_time}")
@@ -386,32 +410,24 @@ class BondAlertSystem:
         self.send_slack_alert(f"Month-to-Date Cumulative Volume (as of {alert_suffix})", change_data, is_mtd=True)
 
     def run_scheduled_alerts(self):
-        """Determine which alert to run based on current time - flexible timing"""
+        """Determine which alert to run based on current time"""
         now = datetime.now(self.ist_tz)
         current_hour = now.hour
         current_minute = now.minute
         
         logger.info(f"Current time: {now.strftime('%Y-%m-%d %I:%M %p IST')}")
         
-        # Window for 11 AM alerts
-        if current_hour == 11:
+        # 11 AM window: 10:30 AM to 11:30 AM
+        if (current_hour == 10 and current_minute >= 30) or (current_hour == 11 and current_minute <= 30):
             logger.info("Running 11 AM window alerts...")
             self.send_24hr_11am_alert()
             self.send_mtd_alert()
             return
         
-        # Window for 6 PM alerts
-        if current_hour == 18:
+        # 6 PM window: 5:30 PM to 6:30 PM
+        if (current_hour == 17 and current_minute >= 30) or (current_hour == 18 and current_minute <= 30):
             logger.info("Running 6 PM window alert...")
             self.send_24hr_6pm_alert()
-            self.send_mtd_alert()
-            return
-        
-        # Window for 7:10 PM test alerts (runs between 7:05 PM and 7:15 PM)
-        if current_hour == 19 and 40 <= current_minute <= 50:
-            logger.info("Running 7:10 PM test alerts...")
-            self.send_24hr_6pm_alert()
-            self.send_mtd_alert()
             return
         
         logger.info(f"No scheduled alerts for current time: {now.strftime('%I:%M %p')}")
