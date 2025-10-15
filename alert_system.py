@@ -37,7 +37,7 @@ class BondAlertSystem:
             logger.error(f"Error setting up Google Sheets: {e}")
             raise
 
-    def parse_timestamp_from_header(self, header: str) -> datetime:
+    def parse_timestamp_from_header(self, header: str) -> Optional[datetime]:
         """Extract timestamp from column header like 'Data (2025-10-03 15:50)'"""
         match = re.search(r'\((\d{4}-\d{2}-\d{2} \d{2}:\d{2})\)', header)
         if match:
@@ -70,7 +70,6 @@ class BondAlertSystem:
         for col_idx, col_header, col_time in data_columns:
             time_diff = abs(col_time - target_time)
             
-            # Only consider columns within the window
             if time_diff <= timedelta(minutes=window_minutes) and time_diff < min_time_diff:
                 min_time_diff = time_diff
                 closest_column = (col_idx, col_header, col_time)
@@ -104,13 +103,10 @@ class BondAlertSystem:
         start_col_idx, start_col_header, start_col_time = start_column
         end_col_idx, end_col_header, end_col_time = end_column
         
-        # ✅ BATCH GET: Fetch all relevant data in one API call
         try:
-            # Note: gspread uses 1-based indexing for cols, but lists are 0-based.
             face_value_col_idx = 3
             all_data = self.worksheet.get_all_values(value_render_option='UNFORMATTED_VALUE')
             
-            # Extract columns from the local 'all_data' list (slicing [1:] to skip header)
             all_data_rows = all_data[1:]
             face_values = [row[face_value_col_idx - 1] for row in all_data_rows]
             start_values = [row[start_col_idx - 1] for row in all_data_rows]
@@ -154,33 +150,49 @@ class BondAlertSystem:
 
     def calculate_mtd_volume(self, end_time: datetime) -> Dict:
         """
-        Calculate cumulative MTD volume by summing all daily changes from 1st of month to end_time.
-        This captures true trading volume, not just net position change.
+        Calculate cumulative MTD volume by summing the changes between the ~11 AM snapshot of each day.
         """
         now = datetime.now(self.ist_tz)
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
         all_columns = self.get_data_columns()
+        
+        # 1. Get all data columns within the current month
         month_columns = [
             (idx, header, ts) for idx, header, ts in all_columns
             if month_start <= ts <= end_time
         ]
+
+        # 2. Group these snapshots by their calendar day
+        snapshots_by_day = {}
+        for col_idx, header, ts in month_columns:
+            day = ts.date()
+            if day not in snapshots_by_day:
+                snapshots_by_day[day] = []
+            snapshots_by_day[day].append((col_idx, header, ts))
+
+        # 3. For each day, find the single snapshot closest to 11:00 AM
+        daily_11am_columns = []
+        for day, snapshots in snapshots_by_day.items():
+            target_11am = datetime(day.year, day.month, day.day, 11, 0, tzinfo=self.ist_tz)
+            closest_snapshot = min(snapshots, key=lambda s: abs(s[2] - target_11am))
+            daily_11am_columns.append(closest_snapshot)
         
-        if len(month_columns) < 2:
-            logger.warning("Not enough data columns in current month for MTD calculation")
+        # 4. Sort the chosen daily snapshots chronologically
+        daily_11am_columns.sort(key=lambda x: x[2])
+        
+        if len(daily_11am_columns) < 2:
+            logger.warning("Not enough daily 11 AM snapshots in current month for MTD calculation")
             return {
                 'net_change': 0,
                 'start_time': month_start,
                 'end_time': end_time,
-                'error': 'Insufficient data for MTD calculation',
-                'snapshots_used': len(month_columns)
+                'error': 'Insufficient data for MTD calculation (need at least two days with ~11 AM data)',
+                'snapshots_used': len(daily_11am_columns)
             }
         
-        month_columns.sort(key=lambda x: x[2])
-        
-        logger.info(f"Calculating MTD volume using {len(month_columns)} snapshots from {month_columns[0][2]} to {month_columns[-1][2]}")
+        logger.info(f"Calculating MTD volume using {len(daily_11am_columns)} daily 11 AM snapshots.")
 
-        # ✅ BATCH GET: Fetch all sheet data in ONE API call before the loop
         try:
             all_data = self.worksheet.get_all_values(value_render_option='UNFORMATTED_VALUE')
             all_data_rows = all_data[1:] # Skip header row
@@ -193,13 +205,11 @@ class BondAlertSystem:
         bonds_processed = 0
         snapshots_processed = 0
         
-        # Calculate cumulative changes between consecutive snapshots
-        for i in range(len(month_columns) - 1):
-            prev_col_idx, _, prev_time = month_columns[i]
-            curr_col_idx, _, curr_time = month_columns[i+1]
+        # 5. Calculate cumulative changes between consecutive daily 11 AM snapshots
+        for i in range(len(daily_11am_columns) - 1):
+            prev_col_idx, _, prev_time = daily_11am_columns[i]
+            curr_col_idx, _, curr_time = daily_11am_columns[i + 1]
             
-            # ❌ NO API CALLS HERE! Extract data from the local 'all_data' list.
-            # Remember to subtract 1 for 0-based list indexing.
             try:
                 prev_values = [row[prev_col_idx - 1] for row in all_data_rows]
                 curr_values = [row[curr_col_idx - 1] for row in all_data_rows]
@@ -220,7 +230,7 @@ class BondAlertSystem:
                     
                     snapshot_volume += volume_change
                     
-                    if i == 0:  # Count bonds only on the first pass
+                    if i == 0:
                         bonds_processed += 1
                         
                 except (ValueError, TypeError):
@@ -228,20 +238,21 @@ class BondAlertSystem:
             
             cumulative_volume += snapshot_volume
             snapshots_processed += 1
-            logger.info(f"Snapshot {i+1}: {prev_time.strftime('%Y-%m-%d %H:%M')} → {curr_time.strftime('%Y-%m-%d %H:%M')}: ₹{snapshot_volume:,.2f}")
+            logger.info(f"Day-to-Day Change {i+1}: {prev_time.strftime('%b %d')} → {curr_time.strftime('%b %d')}: ₹{snapshot_volume:,.2f}")
         
-        logger.info(f"Total MTD cumulative volume: ₹{cumulative_volume:,.2f} across {snapshots_processed} intervals")
+        logger.info(f"Total MTD cumulative volume: ₹{cumulative_volume:,.2f} across {snapshots_processed} daily intervals")
         
         return {
             'net_change': cumulative_volume,
-            'start_time': month_columns[0][2],
-            'end_time': month_columns[-1][2],
-            'start_snapshot': month_columns[0][1],
-            'end_snapshot': month_columns[-1][1],
+            'start_time': daily_11am_columns[0][2],
+            'end_time': daily_11am_columns[-1][2],
+            'start_snapshot': daily_11am_columns[0][1],
+            'end_snapshot': daily_11am_columns[-1][1],
             'bonds_processed': bonds_processed,
-            'snapshots_used': len(month_columns),
+            'snapshots_used': len(daily_11am_columns),
             'intervals_calculated': snapshots_processed
         }
+
 
     def send_slack_alert(self, alert_type: str, change_data: Dict, is_mtd: bool = False):
         """Send formatted alert to Slack"""
@@ -255,18 +266,15 @@ class BondAlertSystem:
             
             net_change = change_data['net_change']
             
-            # Create color based on net change (green for positive/sold, red for negative/bought)
             color = "#36a64f" if net_change >= 0 else "#ff0000"
             
-            # Determine direction text
             if net_change > 0:
-                direction = f"📉 Volume Decreased (Sold)"
+                direction = "📉 Volume Decreased (Sold)"
             elif net_change < 0:
-                direction = f"📈 Volume Increased (Bought)"
+                direction = "📈 Volume Increased (Bought)"
             else:
-                direction = f"➡️ No Change"
+                direction = "➡️ No Change"
             
-            # Format the volume with Indian numbering system
             def format_indian_currency(amount):
                 """Format currency in Indian style (Lakhs/Crores)"""
                 abs_amount = abs(amount)
@@ -309,11 +317,10 @@ class BondAlertSystem:
                 }
             ]
             
-            # Add MTD-specific info
             if is_mtd and 'snapshots_used' in change_data:
                 fields.append({
                     "title": "Calculation Method",
-                    "value": f"Cumulative across {change_data['intervals_calculated']} intervals using {change_data['snapshots_used']} snapshots",
+                    "value": f"Cumulative across {change_data['intervals_calculated']} daily intervals using {change_data['snapshots_used']} snapshots",
                     "short": False
                 })
             
@@ -347,11 +354,10 @@ class BondAlertSystem:
         """Alert 1: 24hr volume change (yesterday ~11am to today ~11am)"""
         now = datetime.now(self.ist_tz)
         
-        # Target times around 11 AM
         end_time = now.replace(hour=11, minute=0, second=0, microsecond=0)
         start_time = end_time - timedelta(days=1)
         
-        logger.info(f"Calculating 24hr volume change (11am-11am)")
+        logger.info("Calculating 24hr volume change (11am-11am)")
         change_data = self.calculate_inventory_change(start_time, end_time)
         self.send_slack_alert("24hr Volume Change (11 AM - 11 AM)", change_data)
 
@@ -359,27 +365,20 @@ class BondAlertSystem:
         """Alert 2: 24hr volume change (yesterday ~6pm to today ~6pm)"""
         now = datetime.now(self.ist_tz)
         
-        # Target times around 6 PM
         end_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
         start_time = end_time - timedelta(days=1)
         
-        logger.info(f"Calculating 24hr volume change (6pm-6pm)")
+        logger.info("Calculating 24hr volume change (6pm-6pm)")
         change_data = self.calculate_inventory_change(start_time, end_time)
         self.send_slack_alert("24hr Volume Change (6 PM - 6 PM)", change_data)
 
     def send_mtd_alert(self):
         """Alert 3: MTD cumulative volume change (all daily changes from 1st of month to now)"""
         now = datetime.now(self.ist_tz)
-        current_hour = now.hour
         
-        # End time depends on when this is called (11 AM or 6 PM)
-        if 10 <= current_hour <= 11:
-            end_time = now.replace(hour=11, minute=0, second=0, microsecond=0)
-            alert_suffix = "11 AM"
-        else:  # 6 PM window
-            end_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
-            alert_suffix = "6 PM"
-        
+        end_time = now.replace(hour=23, minute=59, second=59) # Ensure we get all of today's snapshots
+        alert_suffix = now.strftime("%I %p")
+
         logger.info(f"Calculating MTD cumulative volume up to {end_time}")
         change_data = self.calculate_mtd_volume(end_time)
         self.send_slack_alert(f"Month-to-Date Cumulative Volume (as of {alert_suffix})", change_data, is_mtd=True)
@@ -388,39 +387,34 @@ class BondAlertSystem:
         """Determine which alert to run based on current time - flexible timing"""
         now = datetime.now(self.ist_tz)
         current_hour = now.hour
-        current_minute = now.minute
         
         logger.info(f"Current time: {now.strftime('%Y-%m-%d %I:%M %p IST')}")
         
-        # Alert 1 & 3: Run around 11 AM (10:45 AM to 11:45 AM window)
-        if 10 <= current_hour <= 11:
-            if (current_hour == 10 and current_minute >= 45) or (current_hour == 11 and current_minute <= 45):
-                logger.info("Running 11 AM window alerts...")
-                self.send_24hr_11am_alert()
-                self.send_mtd_alert()
-                return
+        # Window for 11 AM alerts
+        if current_hour == 11:
+            logger.info("Running 11 AM window alerts...")
+            self.send_24hr_11am_alert()
+            self.send_mtd_alert()
+            return
         
-        # Alert 2 & 3: Run around 6 PM (5:45 PM to 6:45 PM window)
-        if 17 <= current_hour <= 18:
-            if (current_hour == 17 and current_minute >= 45) or (current_hour == 18 and current_minute <= 45):
-                logger.info("Running 6 PM window alert...")
-                self.send_24hr_6pm_alert()
-                self.send_mtd_alert()
-                return
+        # Window for 6 PM alerts
+        if current_hour == 18:
+            logger.info("Running 6 PM window alert...")
+            self.send_24hr_6pm_alert()
+            self.send_mtd_alert()
+            return
         
-        logger.info(f"No scheduled alerts for current time: {current_hour}:{current_minute:02d}")
+        logger.info(f"No scheduled alerts for current time: {now.strftime('%I:%M %p')}")
 
 def main():
     """Main function to run alerts"""
     CREDENTIALS_PATH = 'service_account.json'
-    SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/1dIFvqToTTF0G9qyRy6dSdAtVOU763K0N3iOLkp0iWJY/edit?gid=0#gid=0'
+    SPREADSHEET_URL = 'YOUR_SPREADSHEET_URL_HERE' # Replace with your actual URL
     
-    # Get Slack webhook URL from environment variable
     SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL')
     
     if not SLACK_WEBHOOK_URL:
         logger.error("SLACK_WEBHOOK_URL environment variable is not set!")
-        logger.error("Please set it using: export SLACK_WEBHOOK_URL='your_webhook_url'")
         return
     
     try:
