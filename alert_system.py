@@ -59,7 +59,7 @@ class BondAlertSystem:
         
         return sorted(data_columns, key=lambda x: x[2])
 
-    def find_closest_data_column(self, target_time: datetime, window_minutes: int = 60) -> Optional[Tuple[int, str, datetime]]:
+    def find_closest_data_column(self, target_time: datetime, window_minutes: int = 30) -> Optional[Tuple[int, str, datetime]]:
         """
         Find the Data column closest to the target time within a time window.
         window_minutes: Look for data within ± this many minutes from target
@@ -83,145 +83,71 @@ class BondAlertSystem:
         
         return closest_column
 
-    def calculate_inventory_change(self, start_time: datetime, end_time: datetime) -> Dict:
+    def calculate_hourly_changes(self, start_time: datetime, end_time: datetime) -> Dict:
         """
-        Calculate net volume change between two time points.
-        Returns the difference: (start_inventory - end_inventory) * face_value for all bonds.
+        Calculate volume changes between consecutive hourly snapshots.
+        Returns cumulative change and hourly breakdown.
         """
-        start_column = self.find_closest_data_column(start_time, window_minutes=60)
-        end_column = self.find_closest_data_column(end_time, window_minutes=60)
+        # Generate list of target hourly timestamps
+        hourly_timestamps = []
+        current = start_time
+        while current <= end_time:
+            hourly_timestamps.append(current)
+            current += timedelta(hours=1)
         
-        if not start_column or not end_column:
-            logger.error("Could not find data columns for the specified time range")
-            return {
-                'net_change': 0,
-                'start_time': start_time,
-                'end_time': end_time,
-                'start_snapshot': None,
-                'end_snapshot': None,
-                'error': 'Data columns not found'
-            }
+        logger.info(f"Calculating hourly changes from {start_time} to {end_time}")
+        logger.info(f"Total hours to process: {len(hourly_timestamps) - 1}")
         
-        start_col_idx, start_col_header, start_col_time = start_column
-        end_col_idx, end_col_header, end_col_time = end_column
-        
+        # Fetch all sheet data once
         try:
             face_value_col_idx = 3
             all_data = self.worksheet.get_all_values(value_render_option='UNFORMATTED_VALUE')
-            
-            all_data_rows = all_data[1:]
+            all_data_rows = all_data[1:]  # Skip header
             face_values = [row[face_value_col_idx - 1] for row in all_data_rows]
-            start_values = [row[start_col_idx - 1] for row in all_data_rows]
-            end_values = [row[end_col_idx - 1] for row in all_data_rows]
-            
-        except IndexError:
-            logger.error("A column index was out of range. Check sheet structure.")
-            return {'error': 'Sheet data structure is inconsistent.'}
         except Exception as e:
             logger.error(f"Failed to fetch batch data from sheet: {e}")
             return {'error': f'API data fetch failed: {e}'}
-
-        net_volume_change = 0
-        bonds_processed = 0
         
-        for row_idx in range(min(len(start_values), len(end_values), len(face_values))):
-            try:
-                start_inv = float(start_values[row_idx]) if start_values[row_idx] else 0
-                end_inv = float(end_values[row_idx]) if end_values[row_idx] else 0
-                face_value = float(face_values[row_idx]) if face_values[row_idx] else 0
-                
-                quantity_change = start_inv - end_inv
-                volume_change = quantity_change * face_value
-                
-                net_volume_change += volume_change
-                bonds_processed += 1
-                
-            except (ValueError, TypeError):
-                continue
-        
-        logger.info(f"Calculated volume change: ₹{net_volume_change:,.2f} across {bonds_processed} bonds")
-        
-        return {
-            'net_change': net_volume_change,
-            'start_time': start_col_time,
-            'end_time': end_col_time,
-            'start_snapshot': start_col_header,
-            'end_snapshot': end_col_header,
-            'bonds_processed': bonds_processed
-        }
-
-    def calculate_mtd_volume(self, end_time: datetime) -> Dict:
-        """
-        Calculate cumulative MTD volume by summing the changes between the ~11 AM snapshot of each day.
-        Returns breakdown of daily changes.
-        """
-        now = datetime.now(self.ist_tz)
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        
-        all_columns = self.get_data_columns()
-        
-        # 1. Get all data columns within the current month
-        month_columns = [
-            (idx, header, ts) for idx, header, ts in all_columns
-            if month_start <= ts <= end_time
-        ]
-
-        # 2. Group these snapshots by their calendar day
-        snapshots_by_day = {}
-        for col_idx, header, ts in month_columns:
-            day = ts.date()
-            if day not in snapshots_by_day:
-                snapshots_by_day[day] = []
-            snapshots_by_day[day].append((col_idx, header, ts))
-
-        # 3. For each day, find the single snapshot closest to 11:00 AM
-        daily_11am_columns = []
-        for day, snapshots in snapshots_by_day.items():
-            target_11am = datetime(day.year, day.month, day.day, 11, 0, tzinfo=self.ist_tz)
-            closest_snapshot = min(snapshots, key=lambda s: abs(s[2] - target_11am))
-            daily_11am_columns.append(closest_snapshot)
-        
-        # 4. Sort the chosen daily snapshots chronologically
-        daily_11am_columns.sort(key=lambda x: x[2])
-        
-        if len(daily_11am_columns) < 2:
-            logger.warning("Not enough daily 11 AM snapshots in current month for MTD calculation")
-            return {
-                'net_change': 0,
-                'start_time': month_start,
-                'end_time': end_time,
-                'error': 'Insufficient data for MTD calculation (need at least two days with ~11 AM data)',
-                'snapshots_used': len(daily_11am_columns)
-            }
-        
-        logger.info(f"Calculating MTD volume using {len(daily_11am_columns)} daily 11 AM snapshots.")
-
-        try:
-            all_data = self.worksheet.get_all_values(value_render_option='UNFORMATTED_VALUE')
-            all_data_rows = all_data[1:] # Skip header row
-            face_values = [row[2] for row in all_data_rows] # Face value is in column C (index 2)
-        except Exception as e:
-            logger.error(f"Failed to fetch batch data from sheet: {e}")
-            return {'error': f'API data fetch failed: {e}'}
-
         cumulative_volume = 0
         bonds_processed = 0
-        snapshots_processed = 0
-        daily_breakdown = []
+        hourly_breakdown = []
+        hours_processed = 0
+        first_snapshot = None
+        last_snapshot = None
         
-        # 5. Calculate cumulative changes between consecutive daily 11 AM snapshots
-        for i in range(len(daily_11am_columns) - 1):
-            prev_col_idx, _, prev_time = daily_11am_columns[i]
-            curr_col_idx, _, curr_time = daily_11am_columns[i + 1]
+        # Calculate changes between consecutive hours
+        for i in range(len(hourly_timestamps) - 1):
+            prev_target = hourly_timestamps[i]
+            curr_target = hourly_timestamps[i + 1]
+            
+            prev_column = self.find_closest_data_column(prev_target, window_minutes=30)
+            curr_column = self.find_closest_data_column(curr_target, window_minutes=30)
+            
+            if not prev_column or not curr_column:
+                logger.warning(f"Skipping hour {prev_target.strftime('%I %p')} → {curr_target.strftime('%I %p')} - missing data")
+                hourly_breakdown.append({
+                    'prev_time': prev_target.strftime('%b %d %I %p'),
+                    'curr_time': curr_target.strftime('%b %d %I %p'),
+                    'change': None,
+                    'missing': True
+                })
+                continue
+            
+            prev_col_idx, prev_col_header, prev_col_time = prev_column
+            curr_col_idx, curr_col_header, curr_col_time = curr_column
+            
+            if first_snapshot is None:
+                first_snapshot = prev_col_header
+            last_snapshot = curr_col_header
             
             try:
                 prev_values = [row[prev_col_idx - 1] for row in all_data_rows]
                 curr_values = [row[curr_col_idx - 1] for row in all_data_rows]
             except IndexError:
-                logger.warning(f"Skipping interval due to inconsistent sheet data for columns {prev_col_idx} or {curr_col_idx}")
+                logger.warning(f"Skipping hour due to inconsistent sheet data")
                 continue
-
-            snapshot_volume = 0
+            
+            hour_volume = 0
             
             for row_idx in range(min(len(prev_values), len(curr_values), len(face_values))):
                 try:
@@ -232,7 +158,7 @@ class BondAlertSystem:
                     quantity_change = prev_inv - curr_inv
                     volume_change = quantity_change * face_value
                     
-                    snapshot_volume += volume_change
+                    hour_volume += volume_change
                     
                     if i == 0:
                         bonds_processed += 1
@@ -240,29 +166,155 @@ class BondAlertSystem:
                 except (ValueError, TypeError):
                     continue
             
-            cumulative_volume += snapshot_volume
-            snapshots_processed += 1
+            cumulative_volume += hour_volume
+            hours_processed += 1
             
-            # Store daily breakdown
-            daily_breakdown.append({
-                'prev_date': prev_time.strftime('%b %d'),
-                'curr_date': curr_time.strftime('%b %d'),
-                'change': snapshot_volume
+            hourly_breakdown.append({
+                'prev_time': prev_col_time.strftime('%b %d %I %p'),
+                'curr_time': curr_col_time.strftime('%b %d %I %p'),
+                'change': hour_volume,
+                'missing': False
             })
             
-            logger.info(f"Day-to-Day Change {i+1}: {prev_time.strftime('%b %d')} → {curr_time.strftime('%b %d')}: ₹{snapshot_volume:,.2f}")
+            logger.info(f"Hour {i+1}: {prev_col_time.strftime('%I %p')} → {curr_col_time.strftime('%I %p')}: ₹{hour_volume:,.2f}")
         
-        logger.info(f"Total MTD cumulative volume: ₹{cumulative_volume:,.2f} across {snapshots_processed} daily intervals")
+        logger.info(f"Total cumulative volume: ₹{cumulative_volume:,.2f} across {hours_processed} hours")
         
         return {
             'net_change': cumulative_volume,
-            'start_time': daily_11am_columns[0][2],
-            'end_time': daily_11am_columns[-1][2],
-            'start_snapshot': daily_11am_columns[0][1],
-            'end_snapshot': daily_11am_columns[-1][1],
+            'start_time': start_time,
+            'end_time': end_time,
+            'start_snapshot': first_snapshot,
+            'end_snapshot': last_snapshot,
             'bonds_processed': bonds_processed,
-            'snapshots_used': len(daily_11am_columns),
-            'intervals_calculated': snapshots_processed,
+            'hours_processed': hours_processed,
+            'hourly_breakdown': hourly_breakdown
+        }
+
+    def calculate_mtd_volume_hourly(self, end_time: datetime) -> Dict:
+        """
+        Calculate MTD volume using hourly changes for each day, then sum across all days.
+        """
+        now = datetime.now(self.ist_tz)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        all_columns = self.get_data_columns()
+        
+        # Get all data columns within the current month
+        month_columns = [
+            (idx, header, ts) for idx, header, ts in all_columns
+            if month_start <= ts <= end_time
+        ]
+        
+        # Group snapshots by calendar day
+        snapshots_by_day = {}
+        for col_idx, header, ts in month_columns:
+            day = ts.date()
+            if day not in snapshots_by_day:
+                snapshots_by_day[day] = []
+            snapshots_by_day[day].append((col_idx, header, ts))
+        
+        if len(snapshots_by_day) < 1:
+            logger.warning("No data available in current month for MTD calculation")
+            return {
+                'net_change': 0,
+                'start_time': month_start,
+                'end_time': end_time,
+                'error': 'Insufficient data for MTD calculation',
+                'days_processed': 0
+            }
+        
+        sorted_days = sorted(snapshots_by_day.keys())
+        logger.info(f"Calculating MTD volume across {len(sorted_days)} days with hourly granularity")
+        
+        # Fetch all sheet data once
+        try:
+            face_value_col_idx = 3
+            all_data = self.worksheet.get_all_values(value_render_option='UNFORMATTED_VALUE')
+            all_data_rows = all_data[1:]
+            face_values = [row[face_value_col_idx - 1] for row in all_data_rows]
+        except Exception as e:
+            logger.error(f"Failed to fetch batch data from sheet: {e}")
+            return {'error': f'API data fetch failed: {e}'}
+        
+        cumulative_volume = 0
+        bonds_processed = 0
+        daily_breakdown = []
+        first_snapshot = None
+        last_snapshot = None
+        total_hours_processed = 0
+        
+        # For each day, calculate hourly changes
+        for day_idx, day in enumerate(sorted_days):
+            day_snapshots = sorted(snapshots_by_day[day], key=lambda x: x[2])
+            
+            if len(day_snapshots) < 2:
+                logger.info(f"Skipping {day} - not enough snapshots for hourly calculation")
+                continue
+            
+            day_volume = 0
+            day_hours = 0
+            
+            # Calculate changes between consecutive hours within this day
+            for i in range(len(day_snapshots) - 1):
+                prev_col_idx, prev_col_header, prev_col_time = day_snapshots[i]
+                curr_col_idx, curr_col_header, curr_col_time = day_snapshots[i + 1]
+                
+                if first_snapshot is None:
+                    first_snapshot = prev_col_header
+                last_snapshot = curr_col_header
+                
+                try:
+                    prev_values = [row[prev_col_idx - 1] for row in all_data_rows]
+                    curr_values = [row[curr_col_idx - 1] for row in all_data_rows]
+                except IndexError:
+                    logger.warning(f"Skipping interval due to inconsistent sheet data")
+                    continue
+                
+                interval_volume = 0
+                
+                for row_idx in range(min(len(prev_values), len(curr_values), len(face_values))):
+                    try:
+                        prev_inv = float(prev_values[row_idx]) if prev_values[row_idx] else 0
+                        curr_inv = float(curr_values[row_idx]) if curr_values[row_idx] else 0
+                        face_value = float(face_values[row_idx]) if face_values[row_idx] else 0
+                        
+                        quantity_change = prev_inv - curr_inv
+                        volume_change = quantity_change * face_value
+                        
+                        interval_volume += volume_change
+                        
+                        if day_idx == 0 and i == 0:
+                            bonds_processed += 1
+                            
+                    except (ValueError, TypeError):
+                        continue
+                
+                day_volume += interval_volume
+                day_hours += 1
+                total_hours_processed += 1
+            
+            cumulative_volume += day_volume
+            
+            daily_breakdown.append({
+                'date': day.strftime('%b %d'),
+                'change': day_volume,
+                'hours': day_hours
+            })
+            
+            logger.info(f"Day {day.strftime('%b %d')}: ₹{day_volume:,.2f} across {day_hours} intervals")
+        
+        logger.info(f"Total MTD cumulative volume: ₹{cumulative_volume:,.2f} across {len(daily_breakdown)} days and {total_hours_processed} hourly intervals")
+        
+        return {
+            'net_change': cumulative_volume,
+            'start_time': month_start,
+            'end_time': end_time,
+            'start_snapshot': first_snapshot,
+            'end_snapshot': last_snapshot,
+            'bonds_processed': bonds_processed,
+            'days_processed': len(daily_breakdown),
+            'hours_processed': total_hours_processed,
             'daily_breakdown': daily_breakdown
         }
 
@@ -329,10 +381,33 @@ class BondAlertSystem:
                 }
             ]
             
-            if is_mtd and 'snapshots_used' in change_data:
+            if is_mtd and 'days_processed' in change_data:
                 fields.append({
                     "title": "Calculation Method",
-                    "value": f"Cumulative across {change_data['intervals_calculated']} daily intervals using {change_data['snapshots_used']} snapshots",
+                    "value": f"Cumulative across {change_data['days_processed']} days using {change_data['hours_processed']} hourly intervals",
+                    "short": False
+                })
+            elif 'hours_processed' in change_data:
+                fields.append({
+                    "title": "Calculation Method",
+                    "value": f"Cumulative across {change_data['hours_processed']} hourly intervals",
+                    "short": False
+                })
+            
+            # Add hourly breakdown for 24hr alerts
+            if not is_mtd and 'hourly_breakdown' in change_data and change_data['hourly_breakdown']:
+                breakdown_lines = []
+                for hour_data in change_data['hourly_breakdown']:
+                    if hour_data.get('missing'):
+                        breakdown_lines.append(f"{hour_data['prev_time']} → {hour_data['curr_time']}: ⚠️ Missing data")
+                    else:
+                        formatted_amount = self.format_indian_currency(hour_data['change'])
+                        breakdown_lines.append(f"{hour_data['prev_time']} → {hour_data['curr_time']}: {formatted_amount}")
+                
+                breakdown_text = "\n".join(breakdown_lines)
+                fields.append({
+                    "title": "⏱️ Hourly Breakdown",
+                    "value": breakdown_text,
                     "short": False
                 })
             
@@ -341,7 +416,7 @@ class BondAlertSystem:
                 breakdown_lines = []
                 for day_data in change_data['daily_breakdown']:
                     formatted_amount = self.format_indian_currency(day_data['change'])
-                    breakdown_lines.append(f"{day_data['prev_date']} → {day_data['curr_date']}: {formatted_amount}")
+                    breakdown_lines.append(f"{day_data['date']}: {formatted_amount} ({day_data['hours']} intervals)")
                 
                 breakdown_text = "\n".join(breakdown_lines)
                 fields.append({
@@ -377,36 +452,36 @@ class BondAlertSystem:
             logger.error(f"Error sending Slack alert: {e}")
 
     def send_24hr_11am_alert(self):
-        """Alert 1: 24hr volume change (yesterday ~11am to today ~11am)"""
+        """Alert 1: 24hr volume change with hourly breakdown (yesterday 11am to today 11am)"""
         now = datetime.now(self.ist_tz)
         
         end_time = now.replace(hour=11, minute=0, second=0, microsecond=0)
         start_time = end_time - timedelta(days=1)
         
-        logger.info("Calculating 24hr volume change (11am-11am)")
-        change_data = self.calculate_inventory_change(start_time, end_time)
+        logger.info("Calculating 24hr volume change with hourly breakdown (11am-11am)")
+        change_data = self.calculate_hourly_changes(start_time, end_time)
         self.send_slack_alert("24hr Volume Change (11 AM - 11 AM)", change_data)
 
     def send_24hr_6pm_alert(self):
-        """Alert 2: 24hr volume change (yesterday ~6pm to today ~6pm)"""
+        """Alert 2: 24hr volume change with hourly breakdown (yesterday 6pm to today 6pm)"""
         now = datetime.now(self.ist_tz)
         
         end_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
         start_time = end_time - timedelta(days=1)
         
-        logger.info("Calculating 24hr volume change (6pm-6pm)")
-        change_data = self.calculate_inventory_change(start_time, end_time)
+        logger.info("Calculating 24hr volume change with hourly breakdown (6pm-6pm)")
+        change_data = self.calculate_hourly_changes(start_time, end_time)
         self.send_slack_alert("24hr Volume Change (6 PM - 6 PM)", change_data)
 
     def send_mtd_alert(self):
-        """Alert 3: MTD cumulative volume change with daily breakdown"""
+        """Alert 3: MTD cumulative volume change with daily breakdown (hourly granularity)"""
         now = datetime.now(self.ist_tz)
         
         end_time = now.replace(hour=23, minute=59, second=59)
         alert_suffix = now.strftime("%I %p")
 
-        logger.info(f"Calculating MTD cumulative volume up to {end_time}")
-        change_data = self.calculate_mtd_volume(end_time)
+        logger.info(f"Calculating MTD cumulative volume with hourly granularity up to {end_time}")
+        change_data = self.calculate_mtd_volume_hourly(end_time)
         self.send_slack_alert(f"Month-to-Date Cumulative Volume (as of {alert_suffix})", change_data, is_mtd=True)
 
     def run_scheduled_alerts(self):
@@ -430,8 +505,9 @@ class BondAlertSystem:
             self.send_24hr_6pm_alert()
             return
 
+        # 9 PM window: 21:10 to 21:40
         if (current_hour == 21 and current_minute >= 10) or (current_hour == 21 and current_minute <= 40):
-            logger.info("Running 6 PM window alert...")
+            logger.info("Running 9 PM window alerts...")
             self.send_24hr_6pm_alert()
             self.send_mtd_alert()
             return
