@@ -86,7 +86,7 @@ class BondAlertSystem:
     def calculate_hourly_changes(self, start_time: datetime, end_time: datetime) -> Dict:
         """
         Calculate volume changes between consecutive actual snapshots (not target hours).
-        Returns cumulative change and breakdown between each available snapshot.
+        Returns cumulative change (ONLY POSITIVE intervals) and breakdown between each available snapshot.
         """
         # Get all data columns in the time range
         all_columns = self.get_data_columns()
@@ -127,6 +127,7 @@ class BondAlertSystem:
         bonds_processed = 0
         hourly_breakdown = []
         intervals_processed = 0
+        positive_intervals = 0
         
         first_snapshot = range_columns[0][1]
         last_snapshot = range_columns[-1][1]
@@ -162,19 +163,27 @@ class BondAlertSystem:
                 except (ValueError, TypeError):
                     continue
             
-            cumulative_volume += interval_volume
+            # Only add positive intervals to cumulative volume
+            included = False
+            if interval_volume > 0:
+                cumulative_volume += interval_volume
+                positive_intervals += 1
+                included = True
+            
             intervals_processed += 1
             
             hourly_breakdown.append({
                 'prev_time': prev_col_time.strftime('%b %d %I:%M %p'),
                 'curr_time': curr_col_time.strftime('%b %d %I:%M %p'),
                 'change': interval_volume,
+                'included': included,
                 'missing': False
             })
             
-            logger.info(f"Interval {i+1}: {prev_col_time.strftime('%I:%M %p')} → {curr_col_time.strftime('%I:%M %p')}: ₹{interval_volume:,.2f}")
+            status = "✓ Included" if included else "✗ Excluded (negative)"
+            logger.info(f"Interval {i+1}: {prev_col_time.strftime('%I:%M %p')} → {curr_col_time.strftime('%I:%M %p')}: ₹{interval_volume:,.2f} {status}")
         
-        logger.info(f"Total cumulative volume: ₹{cumulative_volume:,.2f} across {intervals_processed} intervals")
+        logger.info(f"Total cumulative volume (positive only): ₹{cumulative_volume:,.2f} across {positive_intervals}/{intervals_processed} intervals")
         
         return {
             'net_change': cumulative_volume,
@@ -184,12 +193,13 @@ class BondAlertSystem:
             'end_snapshot': last_snapshot,
             'bonds_processed': bonds_processed,
             'intervals_processed': intervals_processed,
+            'positive_intervals': positive_intervals,
             'hourly_breakdown': hourly_breakdown
         }
 
     def calculate_mtd_volume_hourly(self, end_time: datetime) -> Dict:
         """
-        Calculate MTD volume using hourly changes for each day, then sum across all days.
+        Calculate MTD volume using hourly changes for each day (ONLY POSITIVE intervals), then sum across all days.
         """
         now = datetime.now(self.ist_tz)
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -221,7 +231,7 @@ class BondAlertSystem:
             }
         
         sorted_days = sorted(snapshots_by_day.keys())
-        logger.info(f"Calculating MTD volume across {len(sorted_days)} days with hourly granularity")
+        logger.info(f"Calculating MTD volume across {len(sorted_days)} days with hourly granularity (positive intervals only)")
         
         # Fetch all sheet data once
         try:
@@ -239,8 +249,9 @@ class BondAlertSystem:
         first_snapshot = None
         last_snapshot = None
         total_hours_processed = 0
+        total_positive_hours = 0
         
-        # For each day, calculate hourly changes
+        # For each day, calculate hourly changes (only positive)
         for day_idx, day in enumerate(sorted_days):
             day_snapshots = sorted(snapshots_by_day[day], key=lambda x: x[2])
             
@@ -250,6 +261,7 @@ class BondAlertSystem:
             
             day_volume = 0
             day_hours = 0
+            day_positive_hours = 0
             
             # Calculate changes between consecutive hours within this day
             for i in range(len(day_snapshots) - 1):
@@ -286,7 +298,12 @@ class BondAlertSystem:
                     except (ValueError, TypeError):
                         continue
                 
-                day_volume += interval_volume
+                # Only add positive intervals to day volume
+                if interval_volume > 0:
+                    day_volume += interval_volume
+                    day_positive_hours += 1
+                    total_positive_hours += 1
+                
                 day_hours += 1
                 total_hours_processed += 1
             
@@ -295,12 +312,13 @@ class BondAlertSystem:
             daily_breakdown.append({
                 'date': day.strftime('%b %d'),
                 'change': day_volume,
-                'hours': day_hours
+                'hours': day_hours,
+                'positive_hours': day_positive_hours
             })
             
-            logger.info(f"Day {day.strftime('%b %d')}: ₹{day_volume:,.2f} across {day_hours} intervals")
+            logger.info(f"Day {day.strftime('%b %d')}: ₹{day_volume:,.2f} across {day_positive_hours}/{day_hours} positive intervals")
         
-        logger.info(f"Total MTD cumulative volume: ₹{cumulative_volume:,.2f} across {len(daily_breakdown)} days and {total_hours_processed} hourly intervals")
+        logger.info(f"Total MTD cumulative volume (positive only): ₹{cumulative_volume:,.2f} across {len(daily_breakdown)} days and {total_positive_hours}/{total_hours_processed} positive intervals")
         
         return {
             'net_change': cumulative_volume,
@@ -311,6 +329,7 @@ class BondAlertSystem:
             'bonds_processed': bonds_processed,
             'days_processed': len(daily_breakdown),
             'hours_processed': total_hours_processed,
+            'positive_hours': total_positive_hours,
             'daily_breakdown': daily_breakdown
         }
 
@@ -338,14 +357,9 @@ class BondAlertSystem:
             
             net_change = change_data['net_change']
             
-            color = "#36a64f" if net_change >= 0 else "#ff0000"
-            
-            if net_change > 0:
-                direction = "📉 Volume Decreased (Sold)"
-            elif net_change < 0:
-                direction = "📈 Volume Increased (Bought)"
-            else:
-                direction = "➡️ No Change"
+            # Always green for positive-only tracking
+            color = "#36a64f"
+            direction = "📉 Volume Decreased (Sold) - Positive Intervals Only"
             
             formatted_change = self.format_indian_currency(net_change)
             
@@ -356,7 +370,7 @@ class BondAlertSystem:
                     "short": False
                 },
                 {
-                    "title": "Net Volume Change" if not is_mtd else "Cumulative MTD Volume",
+                    "title": "Net Volume Change (Positive Only)" if not is_mtd else "Cumulative MTD Volume (Positive Only)",
                     "value": formatted_change,
                     "short": True
                 },
@@ -380,13 +394,13 @@ class BondAlertSystem:
             if is_mtd and 'days_processed' in change_data:
                 fields.append({
                     "title": "Calculation Method",
-                    "value": f"Cumulative across {change_data['days_processed']} days using {change_data['hours_processed']} intervals",
+                    "value": f"Cumulative across {change_data['days_processed']} days using {change_data['positive_hours']}/{change_data['hours_processed']} positive intervals",
                     "short": False
                 })
             elif 'intervals_processed' in change_data:
                 fields.append({
                     "title": "Calculation Method",
-                    "value": f"Cumulative across {change_data['intervals_processed']} intervals",
+                    "value": f"Cumulative across {change_data['positive_intervals']}/{change_data['intervals_processed']} positive intervals",
                     "short": False
                 })
             
@@ -395,11 +409,12 @@ class BondAlertSystem:
                 breakdown_lines = []
                 for hour_data in change_data['hourly_breakdown']:
                     formatted_amount = self.format_indian_currency(hour_data['change'])
-                    breakdown_lines.append(f"{hour_data['prev_time']} → {hour_data['curr_time']}: {formatted_amount}")
+                    status = "✓" if hour_data.get('included', False) else "✗"
+                    breakdown_lines.append(f"{status} {hour_data['prev_time']} → {hour_data['curr_time']}: {formatted_amount}")
                 
                 breakdown_text = "\n".join(breakdown_lines)
                 fields.append({
-                    "title": "⏱️ Interval Breakdown",
+                    "title": "⏱️ Interval Breakdown (✓=Included, ✗=Excluded)",
                     "value": breakdown_text,
                     "short": False
                 })
@@ -409,7 +424,7 @@ class BondAlertSystem:
                 breakdown_lines = []
                 for day_data in change_data['daily_breakdown']:
                     formatted_amount = self.format_indian_currency(day_data['change'])
-                    breakdown_lines.append(f"{day_data['date']}: {formatted_amount} ({day_data['hours']} intervals)")
+                    breakdown_lines.append(f"{day_data['date']}: {formatted_amount} ({day_data['positive_hours']}/{day_data['hours']} positive)")
                 
                 breakdown_text = "\n".join(breakdown_lines)
                 fields.append({
@@ -451,7 +466,7 @@ class BondAlertSystem:
         end_time = now.replace(hour=11, minute=0, second=0, microsecond=0)
         start_time = end_time - timedelta(days=1)
         
-        logger.info("Calculating 24hr volume change with hourly breakdown (11am-11am)")
+        logger.info("Calculating 24hr volume change with hourly breakdown (11am-11am) - POSITIVE ONLY")
         change_data = self.calculate_hourly_changes(start_time, end_time)
         self.send_slack_alert("24hr Volume Change (11 AM - 11 AM)", change_data)
 
@@ -462,7 +477,7 @@ class BondAlertSystem:
         end_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
         start_time = end_time - timedelta(days=1)
         
-        logger.info("Calculating 24hr volume change with hourly breakdown (6pm-6pm)")
+        logger.info("Calculating 24hr volume change with hourly breakdown (6pm-6pm) - POSITIVE ONLY")
         change_data = self.calculate_hourly_changes(start_time, end_time)
         self.send_slack_alert("24hr Volume Change (6 PM - 6 PM)", change_data)
 
@@ -473,7 +488,7 @@ class BondAlertSystem:
         end_time = now.replace(hour=23, minute=59, second=59)
         alert_suffix = now.strftime("%I %p")
 
-        logger.info(f"Calculating MTD cumulative volume with hourly granularity up to {end_time}")
+        logger.info(f"Calculating MTD cumulative volume with hourly granularity up to {end_time} - POSITIVE ONLY")
         change_data = self.calculate_mtd_volume_hourly(end_time)
         self.send_slack_alert(f"Month-to-Date Cumulative Volume (as of {alert_suffix})", change_data, is_mtd=True)
 
