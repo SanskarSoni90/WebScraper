@@ -85,18 +85,33 @@ class BondAlertSystem:
 
     def calculate_hourly_changes(self, start_time: datetime, end_time: datetime) -> Dict:
         """
-        Calculate volume changes between consecutive hourly snapshots.
-        Returns cumulative change and hourly breakdown.
+        Calculate volume changes between consecutive actual snapshots (not target hours).
+        Returns cumulative change and breakdown between each available snapshot.
         """
-        # Generate list of target hourly timestamps
-        hourly_timestamps = []
-        current = start_time
-        while current <= end_time:
-            hourly_timestamps.append(current)
-            current += timedelta(hours=1)
+        # Get all data columns in the time range
+        all_columns = self.get_data_columns()
         
-        logger.info(f"Calculating hourly changes from {start_time} to {end_time}")
-        logger.info(f"Total hours to process: {len(hourly_timestamps) - 1}")
+        # Filter columns within the time range
+        range_columns = [
+            (idx, header, ts) for idx, header, ts in all_columns
+            if start_time <= ts <= end_time
+        ]
+        
+        if len(range_columns) < 2:
+            logger.error(f"Not enough snapshots in range {start_time} to {end_time}")
+            return {
+                'net_change': 0,
+                'start_time': start_time,
+                'end_time': end_time,
+                'error': 'Not enough snapshots in time range',
+                'snapshots_found': len(range_columns)
+            }
+        
+        # Sort by timestamp
+        range_columns.sort(key=lambda x: x[2])
+        
+        logger.info(f"Calculating changes from {start_time} to {end_time}")
+        logger.info(f"Found {len(range_columns)} snapshots in range")
         
         # Fetch all sheet data once
         try:
@@ -111,43 +126,24 @@ class BondAlertSystem:
         cumulative_volume = 0
         bonds_processed = 0
         hourly_breakdown = []
-        hours_processed = 0
-        first_snapshot = None
-        last_snapshot = None
+        intervals_processed = 0
         
-        # Calculate changes between consecutive hours
-        for i in range(len(hourly_timestamps) - 1):
-            prev_target = hourly_timestamps[i]
-            curr_target = hourly_timestamps[i + 1]
-            
-            prev_column = self.find_closest_data_column(prev_target, window_minutes=30)
-            curr_column = self.find_closest_data_column(curr_target, window_minutes=30)
-            
-            if not prev_column or not curr_column:
-                logger.warning(f"Skipping hour {prev_target.strftime('%I %p')} → {curr_target.strftime('%I %p')} - missing data")
-                hourly_breakdown.append({
-                    'prev_time': prev_target.strftime('%b %d %I %p'),
-                    'curr_time': curr_target.strftime('%b %d %I %p'),
-                    'change': None,
-                    'missing': True
-                })
-                continue
-            
-            prev_col_idx, prev_col_header, prev_col_time = prev_column
-            curr_col_idx, curr_col_header, curr_col_time = curr_column
-            
-            if first_snapshot is None:
-                first_snapshot = prev_col_header
-            last_snapshot = curr_col_header
+        first_snapshot = range_columns[0][1]
+        last_snapshot = range_columns[-1][1]
+        
+        # Calculate changes between consecutive snapshots
+        for i in range(len(range_columns) - 1):
+            prev_col_idx, prev_col_header, prev_col_time = range_columns[i]
+            curr_col_idx, curr_col_header, curr_col_time = range_columns[i + 1]
             
             try:
                 prev_values = [row[prev_col_idx - 1] for row in all_data_rows]
                 curr_values = [row[curr_col_idx - 1] for row in all_data_rows]
             except IndexError:
-                logger.warning(f"Skipping hour due to inconsistent sheet data")
+                logger.warning(f"Skipping interval due to inconsistent sheet data")
                 continue
             
-            hour_volume = 0
+            interval_volume = 0
             
             for row_idx in range(min(len(prev_values), len(curr_values), len(face_values))):
                 try:
@@ -158,7 +154,7 @@ class BondAlertSystem:
                     quantity_change = prev_inv - curr_inv
                     volume_change = quantity_change * face_value
                     
-                    hour_volume += volume_change
+                    interval_volume += volume_change
                     
                     if i == 0:
                         bonds_processed += 1
@@ -166,28 +162,28 @@ class BondAlertSystem:
                 except (ValueError, TypeError):
                     continue
             
-            cumulative_volume += hour_volume
-            hours_processed += 1
+            cumulative_volume += interval_volume
+            intervals_processed += 1
             
             hourly_breakdown.append({
-                'prev_time': prev_col_time.strftime('%b %d %I %p'),
-                'curr_time': curr_col_time.strftime('%b %d %I %p'),
-                'change': hour_volume,
+                'prev_time': prev_col_time.strftime('%b %d %I:%M %p'),
+                'curr_time': curr_col_time.strftime('%b %d %I:%M %p'),
+                'change': interval_volume,
                 'missing': False
             })
             
-            logger.info(f"Hour {i+1}: {prev_col_time.strftime('%I %p')} → {curr_col_time.strftime('%I %p')}: ₹{hour_volume:,.2f}")
+            logger.info(f"Interval {i+1}: {prev_col_time.strftime('%I:%M %p')} → {curr_col_time.strftime('%I:%M %p')}: ₹{interval_volume:,.2f}")
         
-        logger.info(f"Total cumulative volume: ₹{cumulative_volume:,.2f} across {hours_processed} hours")
+        logger.info(f"Total cumulative volume: ₹{cumulative_volume:,.2f} across {intervals_processed} intervals")
         
         return {
             'net_change': cumulative_volume,
-            'start_time': start_time,
-            'end_time': end_time,
+            'start_time': range_columns[0][2],
+            'end_time': range_columns[-1][2],
             'start_snapshot': first_snapshot,
             'end_snapshot': last_snapshot,
             'bonds_processed': bonds_processed,
-            'hours_processed': hours_processed,
+            'intervals_processed': intervals_processed,
             'hourly_breakdown': hourly_breakdown
         }
 
@@ -384,13 +380,13 @@ class BondAlertSystem:
             if is_mtd and 'days_processed' in change_data:
                 fields.append({
                     "title": "Calculation Method",
-                    "value": f"Cumulative across {change_data['days_processed']} days using {change_data['hours_processed']} hourly intervals",
+                    "value": f"Cumulative across {change_data['days_processed']} days using {change_data['hours_processed']} intervals",
                     "short": False
                 })
-            elif 'hours_processed' in change_data:
+            elif 'intervals_processed' in change_data:
                 fields.append({
                     "title": "Calculation Method",
-                    "value": f"Cumulative across {change_data['hours_processed']} hourly intervals",
+                    "value": f"Cumulative across {change_data['intervals_processed']} intervals",
                     "short": False
                 })
             
@@ -398,15 +394,12 @@ class BondAlertSystem:
             if not is_mtd and 'hourly_breakdown' in change_data and change_data['hourly_breakdown']:
                 breakdown_lines = []
                 for hour_data in change_data['hourly_breakdown']:
-                    if hour_data.get('missing'):
-                        breakdown_lines.append(f"{hour_data['prev_time']} → {hour_data['curr_time']}: ⚠️ Missing data")
-                    else:
-                        formatted_amount = self.format_indian_currency(hour_data['change'])
-                        breakdown_lines.append(f"{hour_data['prev_time']} → {hour_data['curr_time']}: {formatted_amount}")
+                    formatted_amount = self.format_indian_currency(hour_data['change'])
+                    breakdown_lines.append(f"{hour_data['prev_time']} → {hour_data['curr_time']}: {formatted_amount}")
                 
                 breakdown_text = "\n".join(breakdown_lines)
                 fields.append({
-                    "title": "⏱️ Hourly Breakdown",
+                    "title": "⏱️ Interval Breakdown",
                     "value": breakdown_text,
                     "short": False
                 })
@@ -505,8 +498,8 @@ class BondAlertSystem:
             self.send_24hr_6pm_alert()
             return
 
-        # test - 4 PM window: 16:10 to 16:40
-        if (current_hour == 16 and current_minute >= 10) or (current_hour == 16 and current_minute <= 40):
+        # 9 PM window: 21:10 to 21:40
+        if (current_hour == 16 and current_minute >= 30) or (current_hour == 17 and current_minute <= 10):
             logger.info("Running 9 PM window alerts...")
             self.send_24hr_6pm_alert()
             self.send_mtd_alert()
