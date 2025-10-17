@@ -508,17 +508,17 @@ class BondAlertSystem:
             return
         
         # 6 PM window: 5:30 PM to 6:30 PM
-        if (current_hour == 17 and current_minute >= 30) or (current_hour == 18 and current_minute <= 30):
+        if (current_hour == 17 and current_minute >= 30) or (current_hour == 18 and current_minute <= 40):
             logger.info("Running 6 PM window alert...")
             self.send_24hr_6pm_alert()
             return
 
         # 9 PM window: 21:10 to 21:40
-        if (current_hour == 22 and current_minute >= 00) or (current_hour == 22 and current_minute <= 40):
+        '''if (current_hour == 22 and current_minute >= 00) or (current_hour == 22 and current_minute <= 40):
             logger.info("Running 10 PM window alerts...")
             self.send_24hr_6pm_alert()
             self.send_mtd_alert()
-            return
+            return'''
         
         logger.info(f"No scheduled alerts for current time: {now.strftime('%I:%M %p')}")
 
