@@ -77,52 +77,54 @@ class StablebondsScraper:
             logger.error(f"Error setting up Selenium: {e}")
             raise
 
-    def get_existing_urls(self) -> Set[str]:
-        """Gets all existing URLs from Column B to prevent duplicates by parsing HYPERLINK formulas."""
+    def get_existing_bonds(self) -> tuple[Set[str], Set[str]]:
+        """Gets all existing bond names and URLs to prevent duplicates."""
         try:
-            logger.info("Fetching existing URLs from the sheet...")
+            logger.info("Fetching existing bond names and URLs from the sheet...")
             
-            # Get all data from column B
-            all_data = self.worksheet.get('B2:B', value_render_option='FORMULA')
+            # Get all data from columns A and B
+            all_data = self.worksheet.get('A2:B', value_render_option='FORMULA')
             
+            bond_names = set()
             urls = set()
             skipped_count = 0
             
-            for index, cell in enumerate(all_data):
+            for index, row in enumerate(all_data):
                 row_num = index + 2
                 
-                if not cell or len(cell) == 0 or not cell[0]:
+                # Skip completely empty rows
+                if not row or len(row) == 0:
                     skipped_count += 1
                     continue
-                    
-                cell_content = cell[0]
                 
-                if '=HYPERLINK' in str(cell_content).upper():
-                    match = re.search(r'=HYPERLINK\("([^"]+)"', cell_content, re.IGNORECASE)
-                    if match:
-                        urls.add(match.group(1))
-                    else:
-                        logger.warning(f"Row {row_num}: Could not parse HYPERLINK formula: {cell_content}")
-                elif str(cell_content).startswith('http'):
-                    urls.add(cell_content)
-                else:
-                    logger.warning(f"Row {row_num}: Cell content is not a URL or HYPERLINK: {cell_content}")
+                # Get name from column A
+                if len(row) > 0 and row[0]:
+                    name = str(row[0]).strip()
+                    if name:
+                        bond_names.add(name.lower())  # Store lowercase for case-insensitive comparison
+                
+                # Get URL from column B
+                if len(row) > 1 and row[1]:
+                    cell_content = row[1]
+                    
+                    if '=HYPERLINK' in str(cell_content).upper():
+                        match = re.search(r'=HYPERLINK\("([^"]+)"', cell_content, re.IGNORECASE)
+                        if match:
+                            urls.add(match.group(1))
+                    elif str(cell_content).startswith('http'):
+                        urls.add(cell_content)
             
-            logger.info(f"Found {len(urls)} existing unique URLs (skipped {skipped_count} empty cells).")
+            logger.info(f"Found {len(bond_names)} existing unique bond names and {len(urls)} existing unique URLs (skipped {skipped_count} empty rows).")
             
-            # Additional verification
-            total_cells_b = len(self.worksheet.col_values(2)) - 1  # Minus header
-            logger.info(f"Total rows with data in column B (including empty): {total_cells_b}")
-            
-            return urls
+            return bond_names, urls
         except Exception as e:
-            logger.error(f"Error fetching URLs from sheet: {e}")
-            return set()
+            logger.error(f"Error fetching bond data from sheet: {e}")
+            return set(), set()
 
-    def scrape_homepage_for_new_bonds(self, existing_urls: Set[str]) -> List[Dict[str, str]]:
+    def scrape_homepage_for_new_bonds(self, existing_names: Set[str], existing_urls: Set[str]) -> List[Dict[str, str]]:
         """
         Scrapes the Stablebonds homepage using Selenium to handle dynamic content,
-        and returns a list of new, unique bonds based on URL.
+        and returns a list of new, unique bonds based on both name and URL.
         """
         url = "https://stablebonds.in/"
         new_bonds = []
@@ -145,13 +147,31 @@ class StablebondsScraper:
                 if not href or '/bonds/' not in href:
                     continue
 
-                if href not in existing_urls:
-                    # Find the <h4> tag inside the link to get the display name
-                    name_tag = link.find('h4')
-                    name = name_tag.get_text(strip=True) if name_tag else "Unknown Bond"
-                    
+                # Find the <h4> tag inside the link to get the display name
+                name_tag = link.find('h4')
+                name = name_tag.get_text(strip=True) if name_tag else "Unknown Bond"
+                
+                # Check both URL and name for duplicates
+                is_duplicate_url = href in existing_urls
+                is_duplicate_name = name.lower() in existing_names
+                
+                if is_duplicate_url and is_duplicate_name:
+                    logger.debug(f"Skipping duplicate bond: {name} (both name and URL exist)")
+                    continue
+                elif is_duplicate_url:
+                    logger.warning(f"URL exists but name differs: '{name}' - URL: {href}")
+                    # Still skip if URL exists, even if name is different
+                    continue
+                elif is_duplicate_name:
+                    logger.warning(f"Name exists but URL differs: '{name}' - New URL: {href}")
+                    # Skip if name exists to prevent duplicates in Column A
+                    continue
+                else:
+                    # This is a genuinely new bond
                     new_bonds.append({'name': name, 'url': href})
                     existing_urls.add(href)
+                    existing_names.add(name.lower())
+                    logger.info(f"Found new bond: {name}")
             
             return new_bonds
         except TimeoutException:
@@ -160,6 +180,28 @@ class StablebondsScraper:
         except Exception as e:
             logger.error(f"An error occurred during homepage scraping: {e}")
             return []
+    
+    def get_last_data_row(self) -> int:
+        """Get the last row that contains data in column A or B"""
+        try:
+            col_a_values = self.worksheet.col_values(1)  # Column A
+            col_b_values = self.worksheet.col_values(2)  # Column B
+            
+            # Find the last non-empty row in either column A or B
+            last_row = max(len(col_a_values), len(col_b_values))
+            
+            # Clean up: find actual last row with meaningful data
+            while last_row > 1:  # Don't go above header
+                if (last_row <= len(col_a_values) and col_a_values[last_row - 1].strip()) or \
+                   (last_row <= len(col_b_values) and col_b_values[last_row - 1].strip()):
+                    break
+                last_row -= 1
+            
+            logger.info(f"Last data row found at: {last_row}")
+            return last_row
+        except Exception as e:
+            logger.error(f"Error finding last data row: {e}")
+            return 1  # Return header row if error
             
     def get_urls_from_sheet(self) -> List[Dict[str, any]]:
         """Gets all URLs from the sheet for scraping, including row numbers."""
@@ -198,7 +240,7 @@ class StablebondsScraper:
                 else:
                     logger.warning(f"Row {row_num} has name '{display_name}' but no URL in column B")
             
-            logger.info(f"Retrieved {len(url_data)} URLs for detailed scraping (expected around 116).")
+            logger.info(f"Retrieved {len(url_data)} URLs for detailed scraping.")
             
             # Additional check: Get total non-empty rows in column B
             all_col_b = self.worksheet.col_values(2)
@@ -250,25 +292,38 @@ class StablebondsScraper:
         
         try:
             # === PART 1: DISCOVER AND ADD NEW BONDS ===
-            existing_urls = self.get_existing_urls()
-            new_bonds = self.scrape_homepage_for_new_bonds(existing_urls)
+            existing_names, existing_urls = self.get_existing_bonds()
+            new_bonds = self.scrape_homepage_for_new_bonds(existing_names, existing_urls)
 
             if new_bonds:
                 logger.info(f"Found {len(new_bonds)} new bonds to add to the sheet.")
-                rows_to_append = []
-                for bond in new_bonds:
-                    # FIXED: Only add to columns A and B (Name and URL), no Column C
-                    row = [
-                        bond['name'],                                              # Column A: Name
-                        f'=HYPERLINK("{bond["url"]}", "{bond["name"]}")'          # Column B: URL as hyperlink
-                    ]
-                    rows_to_append.append(row)
                 
-                # Append only to columns A and B
-                self.worksheet.append_rows(rows_to_append, value_input_option='USER_ENTERED')
-                logger.info("Successfully added new bonds to columns A and B only.")
+                # Find the next available row after existing data
+                last_row = self.get_last_data_row()
+                next_row = last_row + 1
+                
+                logger.info(f"Adding new bonds starting from row {next_row}")
+                
+                # Add each new bond individually to ensure proper placement
+                for i, bond in enumerate(new_bonds):
+                    row_to_write = next_row + i
+                    
+                    # Write to column A (Name)
+                    self.worksheet.update_cell(row_to_write, 1, bond['name'])
+                    
+                    # Write to column B (URL as hyperlink)
+                    hyperlink_formula = f'=HYPERLINK("{bond["url"]}", "{bond["name"]}")'
+                    self.worksheet.update_cell(row_to_write, 2, hyperlink_formula)
+                    
+                    logger.info(f"Added '{bond['name']}' at row {row_to_write}")
+                    time.sleep(0.5)  # Small delay to avoid rate limiting
+                
+                logger.info("Successfully added new bonds to columns A and B.")
             else:
                 logger.info("No new bonds found on the homepage.")
+
+            # Small delay before fetching updated data
+            time.sleep(2)
 
             # === PART 2: SCRAPE MAX VALUES FOR ALL BONDS (EXISTING + NEW) ===
             url_infos = self.get_urls_from_sheet()
