@@ -3,9 +3,7 @@ on:
   schedule:
     # Runs at the beginning of every hour
     - cron: '0 * * * *'
-    # Additional runs for alert times (30 minutes past the hour)
-    - cron: '30 6 * * *'   # 11:00 AM IST
-    - cron: '30 12 * * *'  # 6:00 PM IST
+    
   workflow_dispatch: # Allows manual trigger
 jobs:
   scrape:
